@@ -34,7 +34,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [x] 2.1 `ModelConfig` dataclass (see docs/ARCHITECTURE.md) → `src/tinyllm/config.py`, presets `smoke` / `main`
 - [x] 2.2 Components: RMSNorm, RoPE, SwiGLU MLP → `src/tinyllm/model.py`, `tests/test_components.py`
 - [x] 2.3 Attention interface plus registry, then the baseline `mha` using `F.scaled_dot_product_attention`. Matches a naive softmax oracle; causal; bf16 on CUDA close to fp32; 52/52 tests pass.
-- [ ] 2.4 Decoder block, full model, tied embeddings, init (std 0.02, residual projections scaled)
+- [x] 2.4 Decoder block, full model, tied embeddings, init (std 0.02, residual projections scaled). `Block` + `Transformer` in `model.py`; 60/60 tests pass.
 - [ ] 2.5 Tests: output shapes, **causality** (changing a future token doesn't change past logits), param count matches the formula
 - [ ] 2.6 Overfit one batch: loss → ~0 within a few hundred steps
 

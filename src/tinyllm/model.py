@@ -4,6 +4,8 @@ Parameter names follow HF Llama (weight, gate_proj, up_proj, down_proj) so the
 Phase 4.8 export, and loading TinyLlama in Phase 4.9, need no renaming.
 """
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -84,3 +86,70 @@ class SwiGLU(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+class Block(nn.Module):
+    """Pre-norm decoder layer: x + attn(norm(x)), then x + mlp(norm(x))."""
+
+    def __init__(self, cfg: ModelConfig, layer_idx: int):
+        super().__init__()
+        # Imported here, not at the top: the attention modules import apply_rope from this file.
+        from tinyllm.attention import build_attention
+
+        self.input_layernorm = RMSNorm(cfg.d_model, cfg.norm_eps)
+        self.self_attn = build_attention(cfg, layer_idx)
+        self.post_attention_layernorm = RMSNorm(cfg.d_model, cfg.norm_eps)
+        self.mlp = SwiGLU(cfg)
+
+    def forward(self, x: Tensor, rope: tuple[Tensor, Tensor], cache=None) -> Tensor:
+        x = x + self.self_attn(self.input_layernorm(x), rope, cache)
+        return x + self.mlp(self.post_attention_layernorm(x))
+
+
+# Projections that write into the residual stream. Their init is scaled down so the
+# stream's variance doesn't grow with depth (GPT-2 / nanoGPT recipe).
+RESIDUAL_PROJ = ("o_proj.weight", "down_proj.weight")
+
+
+class Transformer(nn.Module):
+    """Token ids (B, T) -> logits (B, T, vocab), plus the next-token loss when targets are given."""
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        self.layers = nn.ModuleList(Block(cfg, i) for i in range(cfg.n_layers))
+        self.norm = RMSNorm(cfg.d_model, cfg.norm_eps)
+        self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+        if cfg.tie_embeddings:
+            # One matrix for both: saves V·d params (4.2M in main, 14% of the model).
+            self.lm_head.weight = self.embed_tokens.weight
+        self.rope = RotaryEmbedding(cfg.head_dim, cfg.max_seq_len, cfg.rope_theta)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        std = self.cfg.init_std
+        for m in self.modules():
+            if isinstance(m, (nn.Linear, nn.Embedding)):
+                nn.init.normal_(m.weight, mean=0.0, std=std)
+        resid_std = std / math.sqrt(2 * self.cfg.n_layers)  # 2 residual writes per layer
+        for name, p in self.named_parameters():
+            if name.endswith(RESIDUAL_PROJ):
+                nn.init.normal_(p, mean=0.0, std=resid_std)
+        # RMSNorm weights stay at 1.
+
+    def num_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())  # a tied matrix is counted once
+
+    def forward(self, idx: Tensor, targets: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
+        _, T = idx.shape
+        rope = self.rope(T)
+        x = self.embed_tokens(idx)
+        for layer in self.layers:
+            x = layer(x, rope)
+        logits = self.lm_head(self.norm(x))
+        loss = None
+        if targets is not None:
+            # Loss in fp32: log-softmax over 8192 classes is imprecise in bf16.
+            loss = F.cross_entropy(logits.float().flatten(0, 1), targets.flatten())
+        return logits, loss

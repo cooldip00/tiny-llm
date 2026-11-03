@@ -65,6 +65,12 @@ Only `mha` and `gqa` export to HF Llama. The other variants are research-only.
 ## Init
 - Linear and embedding weights: normal, std 0.02
 - Residual output projections (`o_proj`, `down_proj`): std `0.02 / sqrt(2·n_layers)`
+- RMSNorm weights: 1. The tied `lm_head` shares the embedding's init.
+
+## Model API
+`Transformer(cfg)(idx, targets=None) -> (logits, loss)`. Logits are `(B, T, vocab)` and the loss is
+next-token cross-entropy in fp32 (`None` without targets). Callers shift the targets themselves
+(`x = tokens[:-1]`, `y = tokens[1:]`).
 
 ## Planned code layout
 ```

@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 2 — Model (Phase 1 complete)
-- **Step:** 2.4 Decoder block, full model, tied embeddings, init
-- **Next action:** `Block` + `Transformer` in `src/tinyllm/model.py` (HF names, residual-scaled init), with tests
+- **Step:** 2.5 Model tests: shapes, causality, param count vs formula
+- **Next action:** extend `tests/test_model.py`: full-model causality, `num_params()` == `estimate_params()` for both presets, initial loss ≈ ln(8192) ≈ 9.01
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,17 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 2.4 block + full model
+- `src/tinyllm/model.py`:
+  - `Block`: pre-norm, `x + self_attn(input_layernorm(x))`, then `x + mlp(post_attention_layernorm(x))`. The attention class comes from the registry via `cfg.layer_types`.
+  - `Transformer`: `embed_tokens` → layers → `norm` → `lm_head`, with `lm_head` tied to `embed_tokens` by default (saves V·d = 4.2M params in main).
+    - `forward(idx, targets=None)` returns `(logits, loss)`; the loss is cross-entropy computed in fp32.
+    - `num_params()` counts the tied matrix once.
+  - Init: Linear/Embedding weights N(0, 0.02); `o_proj` and `down_proj` N(0, 0.02/√(2·n_layers)) (smoke: 0.0058); RMSNorm weights 1.
+- The attention import inside `Block.__init__` is lazy because `attention/mha.py` imports `apply_rope` from `model.py` (avoids a circular import).
+- `tests/test_model.py`: block and model shapes, tied/untied head, HF Llama names, RoPE tables not in the state_dict, init std per weight group, too-long input rejected.
+- 60/60 tests pass.
 
 ### 2026-11-03 — Step 2.3 attention interface + `mha`
 - `src/tinyllm/attention/base.py`: `Attention` contract (`forward(x, rope, cache=None)`, `cache_bytes_per_token()`), `ATTENTION` registry, `@register` decorator (duplicates raise), `build_attention(cfg, layer_idx)` (unknown names raise `KeyError` listing the registered ones).
