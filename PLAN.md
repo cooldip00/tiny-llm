@@ -45,7 +45,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ## Phase 3 — Training
 - [x] 3.1 Data loader: random fixed-length windows from the memmap, pinned memory. `data.get_batch`: 3.6M tokens/s to GPU at 32×512 (~50× what training needs); 79/79 tests pass.
 - [x] 3.2 Loop: bf16 autocast, AdamW (fused), warmup + cosine LR, grad accumulation, grad clip 1.0. `src/tinyllm/train.py`, hyperparameters D-019; smoke ~131K tok/s, main ~74K tok/s; 87/87 tests pass.
-- [ ] 3.3 Eval every N steps, checkpoint save/resume, sample text at each eval
+- [x] 3.3 Eval every N steps, checkpoint save/resume, sample text at each eval. Resume is bit-identical (tested); `--stop_at` / `--resume` let the main run train in chunks; 93/93 tests pass.
 - [ ] 3.4 Logging (backend per DECISIONS.md)
 - [ ] 3.5 Throughput: tokens/sec and MFU, logged
 - [ ] 3.6 Smoke run: ~14M config, ~30 min

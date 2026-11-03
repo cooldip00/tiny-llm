@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 3 — Training (Phase 2 complete)
-- **Step:** 3.3 Eval every N steps, checkpoint save/resume, sample text at each eval
-- **Next action:** add `evaluate()` (fixed val batches), `save/load_checkpoint` (model, optimizer, step, rng state, configs) and a sampler to `train.py`, with tests
+- **Step:** 3.4 Logging (backend per DECISIONS.md)
+- **Next action:** check D-013 (W&B), then add a W&B logger to `train.py` with an offline/disabled mode for tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,24 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 3.3 eval, checkpoints, samples
+- `train.py` additions:
+  - `evaluate()`: mean val loss over 20 fixed batches (327,680 tokens). The seed is fixed, so every eval uses the same windows and losses are comparable.
+  - `save_checkpoint` / `load_checkpoint`: temp file then rename (crash-safe), loaded with `weights_only=True`.
+    - `ckpt.pt` holds model + optimizer + rng state + step + best val + both configs, for resuming.
+    - `best.pt` holds weights + model config only, for sampling and export.
+  - Every `eval_every` steps (default 200) and at the last step: val loss, then save `ckpt.pt` (and `best.pt` if val improved), then a sample from the prompt "Once upon a time".
+  - `--resume` continues from `<out_dir>/ckpt.pt`. `--stop_at N` stops early while keeping the full-length LR schedule, so the ~3.7 h main run can be split across sessions. A crash loses at most `eval_every` steps (~6 min for main).
+  - Default run dir: `checkpoints/<preset>` (git-ignored).
+- `src/tinyllm/generate.py`: `sample()` with temperature (0 = greedy), top-k, EOS stop and sliding context, no KV cache. It's only for training samples; the real engine comes in Phase 4.
+- GPU check (smoke, 60 steps, stopped at 40 and resumed): val 8.64 → 4.67 (step 30) → 4.38 (step 39) → **4.13** (step 59).
+  - The samples move from random tokens to TinyStories-like text ("Then, Lily was a good to, the best for…").
+  - Checkpoint sizes: smoke `ckpt.pt` 165 MB, `best.pt` 55 MB. Main will be ~360 MB / ~120 MB.
+- Tests (93/93 pass):
+  - **Resume is bit-identical:** 20 straight steps equal 10 + stop + resume + 10 (CPU, exact equality).
+  - Eval schedule; val loss drops; checkpoint contents; `best.pt` loads into a fresh model.
+  - Sampling: greedy is deterministic, top-k=1 equals greedy, stops at EOS, slides past max_seq_len, restores train mode.
 
 ### 2026-11-03 — Step 3.2 training loop
 - `src/tinyllm/train.py`:

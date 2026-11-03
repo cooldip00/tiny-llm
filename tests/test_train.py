@@ -6,8 +6,9 @@ import pytest
 import torch
 
 from tinyllm.config import ModelConfig
+from tinyllm.generate import sample
 from tinyllm.model import Transformer
-from tinyllm.train import TrainConfig, lr_at, make_optimizer, train, train_step
+from tinyllm.train import TrainConfig, load_checkpoint, lr_at, make_optimizer, train, train_step
 
 # Tiny model + a periodic corpus (next token = current + 1 mod 64), easy to learn on CPU.
 TINY = ModelConfig(vocab_size=64, max_seq_len=32, d_model=32, n_layers=2, n_heads=2, ffn_hidden=64)
@@ -68,25 +69,91 @@ def test_grad_clip_reports_pre_clip_norm_and_clips():
     assert step.item() == pytest.approx(1e-3, rel=1e-3)    # SGD lr=1 step size = clipped norm
 
 
-def test_train_loop_learns_on_cpu():
-    cfg = TrainConfig(seq_len=32, micro_batch=8, grad_accum=2, max_steps=60, lr=3e-3,
-                      min_lr=3e-4, warmup_steps=5, device="cpu", log_every=1)
-    _, hist = train(cfg, model_cfg=TINY, tokens=TOKENS, log=lambda s: None)
-    assert len(hist) == 60
-    assert hist[0]["loss"] == pytest.approx(math.log(64), abs=0.3)
-    assert hist[-1]["loss"] < 0.5 * hist[0]["loss"]
-    assert all(math.isfinite(h["grad_norm"]) for h in hist)
+def tiny_cfg(tmp_path, **kw) -> TrainConfig:
+    base = dict(seq_len=32, micro_batch=8, grad_accum=2, max_steps=60, lr=3e-3, min_lr=3e-4,
+                warmup_steps=5, device="cpu", log_every=1, eval_every=10, eval_batches=2,
+                sample_tokens=0, out_dir=str(tmp_path))
+    return TrainConfig(**{**base, **kw})
 
 
-def test_seq_len_longer_than_model_raises():
+def run(cfg):
+    return train(cfg, model_cfg=TINY, tokens=TOKENS, val_tokens=TOKENS, log=lambda s: None)
+
+
+def test_train_loop_learns_on_cpu(tmp_path):
+    _, hist = run(tiny_cfg(tmp_path))
+    steps = [h for h in hist if "loss" in h]
+    assert len(steps) == 60
+    assert steps[0]["loss"] == pytest.approx(math.log(64), abs=0.3)
+    assert steps[-1]["loss"] < 0.5 * steps[0]["loss"]
+    assert all(math.isfinite(h["grad_norm"]) for h in steps)
+
+
+def test_eval_schedule_and_val_loss_drops(tmp_path):
+    _, hist = run(tiny_cfg(tmp_path))
+    evals = [h for h in hist if "val_loss" in h]
+    assert [e["step"] for e in evals] == [0, 10, 20, 30, 40, 50, 59]   # every 10 + the last step
+    assert evals[-1]["val_loss"] < 0.5 * evals[0]["val_loss"]
+
+
+def test_checkpoint_contents(tmp_path):
+    run(tiny_cfg(tmp_path, max_steps=12))
+    ck = load_checkpoint(tmp_path / "ckpt.pt", "cpu")
+    assert ck["step"] == 11
+    assert set(ck) >= {"model", "optimizer", "rng", "best_val", "model_cfg", "train_cfg"}
+    assert ModelConfig.from_dict(ck["model_cfg"]) == TINY
+    best = load_checkpoint(tmp_path / "best.pt", "cpu")
+    assert best["val_loss"] == ck["best_val"] and "optimizer" not in best
+    m = Transformer(TINY)
+    m.load_state_dict(best["model"])                                  # loads cleanly into a fresh model
+
+
+def test_resume_is_exact(tmp_path):
+    """20 steps in one go == 10 steps, stop, resume, 10 more."""
+    full, _ = run(tiny_cfg(tmp_path / "full", max_steps=20))
+    run(tiny_cfg(tmp_path / "split", max_steps=20, stop_at=10))
+    resumed, hist = run(tiny_cfg(tmp_path / "split", max_steps=20, resume=True))
+    assert [h for h in hist if "loss" in h][0]["step"] == 10
+    for a, b in zip(full.state_dict().values(), resumed.state_dict().values()):
+        torch.testing.assert_close(a, b, atol=0, rtol=0)              # bit-identical on CPU
+
+
+def test_seq_len_longer_than_model_raises(tmp_path):
     with pytest.raises(ValueError):
-        train(TrainConfig(seq_len=64, device="cpu"), model_cfg=TINY, tokens=TOKENS)
+        run(tiny_cfg(tmp_path, seq_len=64))
+
+
+def test_sample_greedy_is_deterministic_and_stops_at_eos():
+    torch.manual_seed(0)
+    model = Transformer(TINY)
+    prompt = torch.tensor([[1, 2, 3]])
+    a = sample(model, prompt, 10, temperature=0)
+    assert a.shape == (1, 13) and torch.equal(a[:, :3], prompt)
+    assert torch.equal(a, sample(model, prompt, 10, temperature=0))
+    eos = a[0, 3].item()                                              # first generated token as "EOS"
+    assert sample(model, prompt, 10, temperature=0, eos_id=eos).shape == (1, 4)
+    assert model.training                                             # restores train mode
+
+
+def test_sample_top_k_1_equals_greedy():
+    torch.manual_seed(0)
+    model = Transformer(TINY)
+    prompt = torch.tensor([[5, 6]])
+    g = torch.Generator().manual_seed(0)
+    assert torch.equal(sample(model, prompt, 8, temperature=1.0, top_k=1, generator=g),
+                       sample(model, prompt, 8, temperature=0))
+
+
+def test_sample_slides_past_max_seq_len():
+    model = Transformer(TINY)
+    out = sample(model, torch.zeros(1, 30, dtype=torch.long), 10, temperature=0)
+    assert out.shape == (1, 40)                                       # > max_seq_len 32, no error
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_train_loop_cuda_fused_bf16():
-    cfg = TrainConfig(seq_len=32, micro_batch=8, grad_accum=2, max_steps=30, lr=3e-3,
-                      warmup_steps=5, device="cuda", log_every=1)
-    model, hist = train(cfg, model_cfg=TINY, tokens=TOKENS, log=lambda s: None)
+def test_train_loop_cuda_fused_bf16(tmp_path):
+    model, hist = run(tiny_cfg(tmp_path, max_steps=30, device="cuda"))
     assert next(model.parameters()).is_cuda
-    assert hist[-1]["loss"] < hist[0]["loss"]
+    steps = [h for h in hist if "loss" in h]
+    assert steps[-1]["loss"] < steps[0]["loss"]
+    assert load_checkpoint(tmp_path / "ckpt.pt", "cuda")["step"] == 29

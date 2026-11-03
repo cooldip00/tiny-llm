@@ -80,8 +80,8 @@ src/tinyllm/
   attention/       # base.py (contract + registry), mha.py, gqa.py, mla.py, gdn.py; __init__.py registers built-ins
   data.py          # dataset loading + text cleanup (D-018), .bin creation, memmap loader, get_batch
   tokenizer.py     # byte-level BPE 8192: train / load (D-007)
-  train.py         # training loop
-  generate.py      # sampling + inference engine (Phase 4)
+  train.py         # TrainConfig + CLI, training loop, eval, checkpoints (ckpt.pt resume / best.pt weights)
+  generate.py      # sample() for training samples now; inference engine (Phase 4)
   export.py        # HF Llama export
 scripts/           # check_env.py, benchmarks
 tests/             # shapes, causality, param count
