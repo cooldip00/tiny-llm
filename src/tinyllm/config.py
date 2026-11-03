@@ -58,6 +58,21 @@ class ModelConfig:
         emb = self.vocab_size * d * (1 if self.tie_embeddings else 2)
         return emb + self.n_layers * per_layer + d
 
+    def flops_per_token(self, seq_len: int) -> int:
+        """Training FLOPs per token (forward + backward), the PaLM MFU convention
+        (Chowdhery et al. 2022, App. B): 6·N + 12·L·(n_heads·head_dim)·T.
+
+        N counts only weights used in matmuls: per-layer projections plus the LM head (V·d).
+        The input embedding lookup and the RMSNorm weights do no matmul work. The attention
+        term counts the full T×T score matrix (no causal discount), as PaLM does, so numbers
+        compare with published MFU. Softmax-attention layers (mha / gqa) only.
+        """
+        d, kv_dim = self.d_model, self.n_kv_heads * self.head_dim
+        matmul = self.n_layers * (2 * d * d + 2 * d * kv_dim + 3 * d * self.ffn_hidden)
+        matmul += self.vocab_size * d
+        attn = 12 * self.n_layers * self.n_heads * self.head_dim * seq_len
+        return 6 * matmul + attn
+
     def to_dict(self) -> dict:
         return asdict(self)
 

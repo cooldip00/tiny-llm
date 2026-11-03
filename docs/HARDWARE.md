@@ -45,7 +45,7 @@ Takeaways:
 ## Compute budget
 Training FLOPs ≈ **6 × N (params) × D (tokens)**.
 
-Planning assumption: **~12–19 TFLOPS effective** (30–50% MFU of the measured 38 TFLOPS sustained). Replace it with the Phase 3 MFU.
+Planning assumption was ~12–19 TFLOPS effective. **Measured in Step 3.5** (PaLM FLOPs convention, vs the 42.0 TFLOPS peak): smoke 13.1 TFLOPS (**31% MFU**, ~135K tok/s), main 15.0 TFLOPS (**36% MFU**, ~73K tok/s). The time estimates below still hold.
 
 | Model | Tokens | FLOPs | Est. time |
 |---|---|---|---|

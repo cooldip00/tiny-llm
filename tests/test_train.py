@@ -102,8 +102,14 @@ def test_logger_receives_train_and_val_metrics(tmp_path):
     val_steps = [s for s, m in rec.calls if "val/loss" in m]
     assert train_steps == [0, 5, 10, 11] and val_steps == [0, 10, 11]
     first = next(m for _, m in rec.calls if "train/loss" in m)
-    assert set(first) == {"train/loss", "train/lr", "train/grad_norm", "train/tok_per_s", "train/tokens"}
+    assert set(first) == {"train/loss", "train/lr", "train/grad_norm", "train/tok_per_s",
+                          "train/tflops", "train/mfu", "train/tokens"}
     assert first["train/tokens"] == 8 * 2 * 32                        # tokens seen after step 0
+    for _, m in rec.calls:
+        if "train/mfu" in m:                                          # MFU = tok/s · FLOPs/token / peak
+            tflops = m["train/tok_per_s"] * TINY.flops_per_token(32) / 1e12
+            assert m["train/tflops"] == pytest.approx(tflops)
+            assert m["train/mfu"] == pytest.approx(tflops / 42.0)
     assert rec.finished
     assert load_checkpoint(tmp_path / "ckpt.pt", "cpu")["wandb_id"] == "test-run-id"  # resume target
 

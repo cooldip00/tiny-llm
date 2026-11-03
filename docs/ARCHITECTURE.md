@@ -24,6 +24,8 @@ Vocab 8192, context 512 (TinyStories samples are short).
 Param formula (tied embeddings, MHA): `V·d + L·(4·d² + 3·d·ffn + 2·d) + d`. The `2·d` per layer and the final `d` are the RMSNorm weights.
 With GQA, `4·d²` becomes `2·d² + 2·d·kv_dim`. `ModelConfig.estimate_params()` implements this, and the Phase 2.5 test checks the real model against it.
 
+Training FLOPs per token (for MFU): `6·N_matmul + 12·L·d·T`, where `N_matmul` is the params minus the RMSNorm weights. This is the PaLM convention. `ModelConfig.flops_per_token(T)` gives main 204.5M and smoke 96.7M at T = 512.
+
 In code: `get_config("main")`, or with overrides such as `get_config("main", n_kv_heads=2)`. Configs are frozen (immutable) and save to and load from dicts for checkpoints.
 
 ## Swappable attention interface

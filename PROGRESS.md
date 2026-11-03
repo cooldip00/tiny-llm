@@ -2,10 +2,9 @@
 
 ## Current
 - **Phase:** 3 — Training (Phase 2 complete)
-- **Step:** 3.5 Throughput: tokens/sec and MFU, logged
-- **Next action:** add an MFU estimate (FLOPs/token × tok/s ÷ 42 TFLOPS peak) to the training logs; tok/s is already logged
-- **Blockers:** none
-- **Before the first online run:** run `uv run wandb login` in WSL yourself (SETUP Step 15). Until then, use `--wandb_mode offline` or `--logger none`.
+- **Step:** 3.6 Smoke run (~14M config, ~30 min)
+- **Next action:** choose the smoke run's token budget, then run it online to W&B
+- **Blockers:** `uv run wandb login` in WSL, done by you (SETUP Step 15), before 3.6 starts
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
 - **Reminder:** the W&B/Forge trial ends around 2026-12-02. Downgrade to Free then.
@@ -14,6 +13,26 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 3.5 throughput and MFU
+- `ModelConfig.flops_per_token(seq_len)` = 6·N + 12·L·d·T, the PaLM convention.
+  - N is the matmul weights only (layers + LM head); embedding lookup and norms are excluded.
+  - The attention term counts the full T×T matrix, so the numbers compare with published MFU.
+  - Values at T = 512: main 204.5M FLOPs/token, smoke 96.7M.
+- `train.py` logs `train/tflops` and `train/mfu` (vs the 42.0 TFLOPS bf16 peak, `--peak_tflops`) next to tok/s, in the terminal and to W&B.
+- GPU check (60 steps per preset, plugged in; step 0 is slow from warmup and is ignored):
+
+  | Preset | tok/s | TFLOPS | MFU |
+  |---|---|---|---|
+  | smoke | 134–137K | 13.0–13.3 | **31%** |
+  | main | 72–75K | 14.7–15.4 | **35–37%** |
+
+  - Throughput drifts down ~4% over a minute as the GPU heats up.
+  - The earlier "~32%" for main used 6·N only. With the attention term it's ~36%.
+  - Main at ~72K tok/s: 1B tokens ≈ 3.9 h.
+- Tests (98/98 pass): hand-computed FLOPs/token for both presets; the attention term scales with T; GQA lowers it; logged MFU = tok/s · FLOPs/token / peak.
+- Parked: `torch.compile` for more throughput (PARKING_LOT).
+- Next: 3.6 smoke run, which needs `wandb login` first.
 
 ### 2026-11-03 — Step 3.4 W&B logging
 - `uv add wandb` → wandb 0.31.0.

@@ -60,6 +60,7 @@ class TrainConfig:
     wandb_project: str = "tinyllm"
     wandb_mode: str = "online"       # "offline" writes to ./wandb; upload later with `wandb sync`
     run_name: str = ""               # default: <preset>
+    peak_tflops: float = 42.0        # MFU denominator: theoretical bf16 dense peak (docs/HARDWARE.md)
 
     @property
     def tokens_per_step(self) -> int:
@@ -205,6 +206,7 @@ def train(
 def _loop(cfg, model, opt, rng, tokens, val_tokens, tok, model_cfg, run_dir,
           start, end, best_val, log, logger) -> list[dict]:
     history: list[dict] = []
+    flops_per_token = model_cfg.flops_per_token(cfg.seq_len)
     t_last, step_last = time.perf_counter(), start - 1
     for step in range(start, end):
         lr = lr_at(step, cfg)
@@ -216,12 +218,16 @@ def _loop(cfg, model, opt, rng, tokens, val_tokens, tok, model_cfg, run_dir,
             rec = {"step": step, "loss": loss.item(), "lr": lr, "grad_norm": grad_norm.item()}
             now = time.perf_counter()  # .item() above synced the GPU, so this timing is real
             rec["tok_per_s"] = (step - step_last) * cfg.tokens_per_step / (now - t_last)
+            rec["tflops"] = rec["tok_per_s"] * flops_per_token / 1e12   # achieved model TFLOPS
+            rec["mfu"] = rec["tflops"] / cfg.peak_tflops
             t_last, step_last = now, step
             history.append(rec)
             log(f"step {step:5d} | loss {rec['loss']:.4f} | lr {lr:.2e} | "
-                f"grad {rec['grad_norm']:.3f} | {rec['tok_per_s'] / 1e3:.1f}K tok/s")
+                f"grad {rec['grad_norm']:.3f} | {rec['tok_per_s'] / 1e3:.1f}K tok/s | "
+                f"{rec['tflops']:.1f} TFLOPS | MFU {rec['mfu']:.1%}")
             logger.log({"train/loss": rec["loss"], "train/lr": lr, "train/grad_norm": rec["grad_norm"],
-                        "train/tok_per_s": rec["tok_per_s"],
+                        "train/tok_per_s": rec["tok_per_s"], "train/tflops": rec["tflops"],
+                        "train/mfu": rec["mfu"],
                         "train/tokens": (step + 1) * cfg.tokens_per_step}, step=step)
 
         if step % cfg.eval_every == 0 or step == end - 1:

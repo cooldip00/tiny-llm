@@ -18,6 +18,15 @@ def test_param_estimates():
     assert get_config("main").estimate_params() == 29_893_120   # ~29.9M
 
 
+def test_flops_per_token():
+    # 6·(params − RMSNorm weights) + 12·L·d·T, hand-computed at T = 512
+    main, smoke = get_config("main"), get_config("smoke")
+    assert main.flops_per_token(512) == 6 * (29_893_120 - 8_704) + 12 * 8 * 512 * 512 == 204_472_320
+    assert smoke.flops_per_token(512) == 6 * (13_767_552 - 4_992) + 12 * 6 * 384 * 512 == 96_731_136
+    assert main.flops_per_token(1024) - main.flops_per_token(512) == 12 * 8 * 512 * 512  # attention term grows with T
+    assert get_config("main", n_kv_heads=2).flops_per_token(512) < main.flops_per_token(512)
+
+
 def test_defaults_fill_in():
     cfg = get_config("main")
     assert cfg.n_kv_heads == cfg.n_heads
