@@ -74,6 +74,7 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **Safety:** the API key is set only with `wandb login` inside WSL. Never put it in the repo or the docs.
 - **Fallback:** TensorBoard. Logging sits behind one small wrapper, so switching is a one-line change.
 - **Rejected:** TensorBoard as the primary backend (weaker run comparison, no shareable link).
+- **Implemented:** Step 3.4, `src/tinyllm/logger.py` (wandb 0.31.0).
 
 ### D-014 — Code location: `~/llm` inside WSL · ACCEPTED (2026-11-03)
 - **Choice:** code, docs and data all live in `~/llm` (`/home/kuladip/llm`), one git repo. From Windows the path is `\\wsl.localhost\Ubuntu-24.04\home\kuladip\llm`.

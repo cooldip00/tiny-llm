@@ -7,6 +7,7 @@ import torch
 
 from tinyllm.config import ModelConfig
 from tinyllm.generate import sample
+from tinyllm.logger import Logger, make_logger
 from tinyllm.model import Transformer
 from tinyllm.train import TrainConfig, load_checkpoint, lr_at, make_optimizer, train, train_step
 
@@ -72,12 +73,61 @@ def test_grad_clip_reports_pre_clip_norm_and_clips():
 def tiny_cfg(tmp_path, **kw) -> TrainConfig:
     base = dict(seq_len=32, micro_batch=8, grad_accum=2, max_steps=60, lr=3e-3, min_lr=3e-4,
                 warmup_steps=5, device="cpu", log_every=1, eval_every=10, eval_batches=2,
-                sample_tokens=0, out_dir=str(tmp_path))
+                sample_tokens=0, out_dir=str(tmp_path), logger="none")
     return TrainConfig(**{**base, **kw})
 
 
-def run(cfg):
-    return train(cfg, model_cfg=TINY, tokens=TOKENS, val_tokens=TOKENS, log=lambda s: None)
+def run(cfg, logger=None):
+    return train(cfg, model_cfg=TINY, tokens=TOKENS, val_tokens=TOKENS, log=lambda s: None,
+                 logger=logger)
+
+
+class RecordingLogger(Logger):
+    run_id = "test-run-id"
+
+    def __init__(self):
+        self.calls, self.finished = [], False
+
+    def log(self, metrics, step):
+        self.calls.append((step, metrics))
+
+    def finish(self):
+        self.finished = True
+
+
+def test_logger_receives_train_and_val_metrics(tmp_path):
+    rec = RecordingLogger()
+    run(tiny_cfg(tmp_path, max_steps=12, log_every=5, eval_every=10), logger=rec)
+    train_steps = [s for s, m in rec.calls if "train/loss" in m]
+    val_steps = [s for s, m in rec.calls if "val/loss" in m]
+    assert train_steps == [0, 5, 10, 11] and val_steps == [0, 10, 11]
+    first = next(m for _, m in rec.calls if "train/loss" in m)
+    assert set(first) == {"train/loss", "train/lr", "train/grad_norm", "train/tok_per_s", "train/tokens"}
+    assert first["train/tokens"] == 8 * 2 * 32                        # tokens seen after step 0
+    assert rec.finished
+    assert load_checkpoint(tmp_path / "ckpt.pt", "cpu")["wandb_id"] == "test-run-id"  # resume target
+
+
+def test_logger_finishes_even_if_training_crashes(tmp_path):
+    rec = RecordingLogger()
+    with pytest.raises(IndexError):
+        # Tokens beyond the 64-token vocab make the embedding lookup fail mid-run.
+        train(tiny_cfg(tmp_path), model_cfg=TINY, tokens=TOKENS + 100, val_tokens=TOKENS,
+              log=lambda s: None, logger=rec)
+    assert rec.finished
+
+
+def test_wandb_logger_disabled_mode(tmp_path):
+    lg = make_logger("wandb", project="tinyllm-test", name="t", config={"a": 1},
+                     mode="disabled", dir=str(tmp_path))
+    lg.log({"train/loss": 1.0}, step=0)
+    lg.log_sample("Once upon a time", step=0)
+    lg.finish()
+
+
+def test_unknown_logger_raises():
+    with pytest.raises(ValueError):
+        make_logger("tensorboard")
 
 
 def test_train_loop_learns_on_cpu(tmp_path):

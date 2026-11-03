@@ -24,6 +24,7 @@ from torch import Tensor, nn
 from tinyllm.config import ModelConfig, get_config
 from tinyllm.data import DATA_DIR, get_batch, load_tokens
 from tinyllm.generate import sample
+from tinyllm.logger import Logger, make_logger
 from tinyllm.model import Transformer
 from tinyllm.tokenizer import EOS, load_tokenizer
 
@@ -55,6 +56,10 @@ class TrainConfig:
     out_dir: str = ""                # default: checkpoints/<preset>
     resume: bool = False             # continue from <out_dir>/ckpt.pt
     stop_at: int = 0                 # stop after this many steps (0 = max_steps); the LR schedule still uses max_steps
+    logger: str = "wandb"            # "wandb" or "none" (D-013)
+    wandb_project: str = "tinyllm"
+    wandb_mode: str = "online"       # "offline" writes to ./wandb; upload later with `wandb sync`
+    run_name: str = ""               # default: <preset>
 
     @property
     def tokens_per_step(self) -> int:
@@ -149,11 +154,13 @@ def train(
     tokens: np.ndarray | None = None,
     val_tokens: np.ndarray | None = None,
     log=print,
+    logger: Logger | None = None,
 ) -> tuple[Transformer, list[dict]]:
     """Run optimizer steps up to cfg.stop_at (or cfg.max_steps). Returns the model and the history.
 
     History rows are {"step", "loss", "lr", "grad_norm", "tok_per_s"} at log steps and
-    {"step", "val_loss"} at eval steps.
+    {"step", "val_loss"} at eval steps. `log` prints to the console; `logger` (built
+    from cfg.logger when not given) sends the same numbers to W&B.
     """
     run_dir = cfg.run_dir
     ckpt = load_checkpoint(run_dir / "ckpt.pt", cfg.device) if cfg.resume else None
@@ -182,7 +189,21 @@ def train(
     log(f"params {model.num_params():,} | {cfg.tokens_per_step:,} tokens/step "
         f"({cfg.micro_batch}x{cfg.seq_len} x {cfg.grad_accum} accum) | steps {start}..{end - 1} "
         f"of {cfg.max_steps} ({cfg.tokens_per_step * cfg.max_steps / 1e6:.1f}M tokens total) | {run_dir}")
+    if logger is None:
+        logger = make_logger(
+            cfg.logger, project=cfg.wandb_project, name=cfg.run_name or cfg.preset,
+            config={**asdict(cfg), "model": model_cfg.to_dict(), "params": model.num_params()},
+            mode=cfg.wandb_mode, run_id=ckpt.get("wandb_id") if ckpt else None, dir=str(REPO))
+    try:
+        history = _loop(cfg, model, opt, rng, tokens, val_tokens, tok, model_cfg, run_dir,
+                        start, end, best_val, log, logger)
+    finally:
+        logger.finish()  # flush W&B even if training crashes or is interrupted
+    return model, history
 
+
+def _loop(cfg, model, opt, rng, tokens, val_tokens, tok, model_cfg, run_dir,
+          start, end, best_val, log, logger) -> list[dict]:
     history: list[dict] = []
     t_last, step_last = time.perf_counter(), start - 1
     for step in range(start, end):
@@ -199,10 +220,14 @@ def train(
             history.append(rec)
             log(f"step {step:5d} | loss {rec['loss']:.4f} | lr {lr:.2e} | "
                 f"grad {rec['grad_norm']:.3f} | {rec['tok_per_s'] / 1e3:.1f}K tok/s")
+            logger.log({"train/loss": rec["loss"], "train/lr": lr, "train/grad_norm": rec["grad_norm"],
+                        "train/tok_per_s": rec["tok_per_s"],
+                        "train/tokens": (step + 1) * cfg.tokens_per_step}, step=step)
 
         if step % cfg.eval_every == 0 or step == end - 1:
             val = evaluate(model, val_tokens, cfg)
             history.append({"step": step, "val_loss": val})
+            logger.log({"val/loss": val, "val/best": min(val, best_val)}, step=step)
             saved = "ckpt.pt"
             if val < best_val:
                 best_val = val
@@ -213,6 +238,7 @@ def train(
             save_checkpoint(run_dir / "ckpt.pt", {
                 "model": model.state_dict(), "optimizer": opt.state_dict(), "rng": rng.bit_generator.state,
                 "step": step, "best_val": best_val, "model_cfg": model_cfg.to_dict(), "train_cfg": asdict(cfg),
+                "wandb_id": logger.run_id,
             })
             log(f"eval  {step:5d} | val {val:.4f} | best {best_val:.4f} | saved {saved}")
             if tok is not None:
@@ -220,9 +246,11 @@ def train(
                 prompt = torch.tensor([tok.encode(SAMPLE_PROMPT).ids], device=cfg.device)
                 out = sample(model, prompt, cfg.sample_tokens, temperature=0.8, top_k=50,
                              eos_id=tok.token_to_id(EOS), generator=gen)
-                log("sample | " + tok.decode(out[0].tolist()).replace("\n", " "))
+                text = tok.decode(out[0].tolist())
+                log("sample | " + text.replace("\n", " "))
+                logger.log_sample(text, step=step)
             t_last, step_last = time.perf_counter(), step  # eval time doesn't count toward tok/s
-    return model, history
+    return history
 
 
 def main() -> None:

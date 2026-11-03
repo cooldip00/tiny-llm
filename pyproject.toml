@@ -8,6 +8,7 @@ dependencies = [
     "numpy",
     "datasets>=5.1.0",
     "tokenizers>=0.23.3",
+    "wandb>=0.31.0",
 ]
 
 [dependency-groups]

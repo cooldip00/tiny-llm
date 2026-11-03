@@ -2,9 +2,10 @@
 
 ## Current
 - **Phase:** 3 — Training (Phase 2 complete)
-- **Step:** 3.4 Logging (backend per DECISIONS.md)
-- **Next action:** check D-013 (W&B), then add a W&B logger to `train.py` with an offline/disabled mode for tests
+- **Step:** 3.5 Throughput: tokens/sec and MFU, logged
+- **Next action:** add an MFU estimate (FLOPs/token × tok/s ÷ 42 TFLOPS peak) to the training logs; tok/s is already logged
 - **Blockers:** none
+- **Before the first online run:** run `uv run wandb login` in WSL yourself (SETUP Step 15). Until then, use `--wandb_mode offline` or `--logger none`.
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
 - **Reminder:** the W&B/Forge trial ends around 2026-12-02. Downgrade to Free then.
@@ -13,6 +14,25 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 3.4 W&B logging
+- `uv add wandb` → wandb 0.31.0.
+- `src/tinyllm/logger.py`: one small interface (`log` / `log_sample` / `finish`) per D-013.
+  - `Logger` is the no-op (`--logger none`).
+  - `WandbLogger` takes `--wandb_mode online|offline|disabled`. wandb is imported lazily, so the no-op path never needs it.
+- `train.py` logs:
+  - `train/loss`, `train/lr`, `train/grad_norm`, `train/tok_per_s`, `train/tokens` every `log_every` steps.
+  - `val/loss` and `val/best` at each eval, plus a `samples` table (step, text).
+  - Only scalars and text go to W&B, never checkpoints (Free plan is 5 GB/month).
+- Resume: the W&B run ID is saved in `ckpt.pt`, so `--resume` continues the same run and the charts stay continuous. The logger is closed in a `finally` block, so a crash still closes the run.
+- New CLI flags: `--logger`, `--wandb_project` (default `tinyllm`), `--wandb_mode`, `--run_name`.
+- GPU check (smoke, offline, 30 steps, stopped at 20 and resumed): both parts used the same run ID `evdo3w4w`, and `ckpt.pt` stores it. Val 8.58 → 5.73 → 5.56 → (resume) **5.34**.
+- Tests (97/97 pass), using a recording logger:
+  - Exact steps for train and val metrics, the metric key set, `train/tokens`.
+  - The run ID lands in the checkpoint.
+  - `finish()` runs even when training crashes.
+  - W&B `disabled` mode works with no network; an unknown backend raises.
+- Next: 3.5 MFU logging.
 
 ### 2026-11-03 — Step 3.3 eval, checkpoints, samples
 - `train.py` additions:

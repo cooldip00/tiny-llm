@@ -81,6 +81,7 @@ src/tinyllm/
   data.py          # dataset loading + text cleanup (D-018), .bin creation, memmap loader, get_batch
   tokenizer.py     # byte-level BPE 8192: train / load (D-007)
   train.py         # TrainConfig + CLI, training loop, eval, checkpoints (ckpt.pt resume / best.pt weights)
+  logger.py        # Logger interface: no-op ("none") and W&B (D-013); log / log_sample / finish
   generate.py      # sample() for training samples now; inference engine (Phase 4)
   export.py        # HF Llama export
 scripts/           # check_env.py, benchmarks

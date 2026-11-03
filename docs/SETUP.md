@@ -213,6 +213,20 @@ uv run pytest -q                           # 17 tests
 ```
 **Why the tokenizer file is committed but `data/` isn't:** the tokenizer is small (554 KB) and defines what each token ID means, so it must never silently change. The `.bin` files are large and can be rebuilt from the tokenizer plus the dataset.
 
+## Step 15 — W&B logging (Step 3.4)
+```bash
+cd ~/llm
+uv add wandb                 # wandb 0.31.0
+uv run wandb login           # once; paste the API key from wandb.ai/authorize at the prompt
+```
+**Why:** training metrics and samples go to W&B (D-013). `wandb login` stores the key in `~/.netrc` inside WSL. **Never put the key in the repo, the docs or the chat.**
+Logger choices on the training CLI:
+- `--logger wandb` (the default) with `--wandb_mode online` (the default). Needs the login above.
+- `--wandb_mode offline` writes runs to `~/llm/wandb/` (git-ignored). Upload them later with `uv run wandb sync wandb/offline-run-*`.
+- `--logger none` logs to the terminal only. The tests use this, so they never touch the network.
+
+A resumed run (`--resume`) reuses the W&B run ID stored in `ckpt.pt`, so the charts continue in the same run.
+
 ---
 
 ## Notes
