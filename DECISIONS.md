@@ -86,3 +86,13 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **Why:** the driver supports up to CUDA 13.3. 2.14.1 is a patch release, so more settled than the newest 2.15.0 (cu132), which ecosystem libraries like `fla` and Triton may not support yet.
 - **Available on 2026-11-03:** cu126 2.14.1, cu128 2.11.0, cu129 2.13.0, cu130 2.14.1, cu132 2.15.0.
 - **Revisit** only if a needed library requires a different version (new entry required).
+
+### D-018 — Text cleanup: fix mojibake, ASCII-only stories · ACCEPTED (2026-11-03)
+- **Problem:** 129,940 of the 130,115 train stories with non-ASCII text contain *mojibake*: UTF-8 punctuation that was decoded as Windows-1252, e.g. `“` → `â€œ`, `’` → `â€™`. That's about 2M junk sequences. Left as is, BPE would spend vocabulary on them and the model would learn to write `â€œ`.
+- **Choice:** `tinyllm.data.clean_text`, applied through `load_clean()` in every step that reads the data:
+  1. Map the mojibake sequences to plain ASCII (`"` `'` `-` `...`). The bare `â€` is a closing quote that lost its last byte, so it's replaced last.
+  2. Map real typographic punctuation (`“ ” ‘ ’ – — …`) to ASCII too.
+  3. Strip whitespace. Drop empty stories, and drop stories that still have any non-ASCII character.
+- **Result:** train 2,119,719 → 2,118,859 (860 dropped, 0.04%); val 21,990 → 21,981 (9 dropped). 0 non-ASCII characters left. Tests in `tests/test_data.py`.
+- **Rejected:** keeping the raw text (wastes vocabulary, garbled output); `ftfy`-style generic repair (an extra dependency for a fixed, known set of sequences); guessing at the leftover accented characters (too rare to matter).
+- **Consequence:** the model only ever sees ASCII. That's fine for TinyStories, but revisit for FineWeb-Edu (parked).

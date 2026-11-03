@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 1 — Data & tokenizer
 - **Step:** 1.2 Train the BPE tokenizer
-- **Next action:** look at the non-ASCII characters (6% of stories) to decide on text cleanup, then train BPE with vocab 8192
+- **Next action:** train byte-level BPE (vocab 8192) on `load_clean("train")`. The cleanup is done (D-018).
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,12 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 1.1b text cleanup (D-018)
+- `scripts/inspect_chars.py` showed that the non-ASCII text is mojibake. Of 130,115 non-ASCII train stories, 129,940 are affected. Top sequences: `â€œ` 270,583; `â€™` 195,201; bare `â€` ~270K (lost closing quote); dashes 15K.
+- Added `src/tinyllm/data.py` with `clean_text` and `load_clean`, and made `tinyllm` an installed package (hatchling build backend).
+- `tests/test_data.py`: 8 passed.
+- `scripts/check_clean.py`: train 2,118,859 kept (860 dropped), val 21,981 kept (9 dropped), 0 non-ASCII left, 1,898,184,006 train characters.
 
 ### 2026-11-03 — Phase 1.1 done
 - Added `datasets` 5.1.0 and `tokenizers` 0.23.3.

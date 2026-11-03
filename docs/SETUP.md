@@ -182,6 +182,27 @@ uv run python scripts/download_data.py       # downloads into ~/.cache/huggingfa
 **Result:** 2,119,719 train / 21,990 val stories. 2.8 GB in the HF cache, outside the repo.
 The "unauthenticated requests" warning is harmless. A HF token only raises the rate limits.
 
+## Step 13 — Make `tinyllm` an installed package, and add tests (Step 1.1b)
+Added to `pyproject.toml`:
+```toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tinyllm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+```
+```bash
+uv sync               # now also installs tinyllm itself, in editable mode
+uv run pytest -q      # run all tests
+```
+**Why:** with a build backend, `uv sync` installs our `src/tinyllm` package in *editable* mode. Scripts and tests can then `import tinyllm` from anywhere, with no `sys.path` hacks, and code changes apply immediately without reinstalling.
+**Why hatchling:** the most common, minimal backend that works with a `src/` layout.
+**Result:** `+ tinyllm==0.1.0 (from file:///home/kuladip/llm)`, 8 tests passed.
+
 ---
 
 ## Notes

@@ -21,8 +21,9 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 
 ## Phase 1 — Data & Tokenizer
 - [x] 1.1 Download TinyStories (`roneneldan/TinyStories`) with HF `datasets` (2.12M train / 22K val stories, 1.9 GB of text)
-- [ ] 1.2 Train a byte-level BPE tokenizer, vocab 8192, with HF `tokenizers`
-- [ ] 1.3 Tokenize into `train.bin` / `val.bin` (numpy uint16 memmap, EOS between stories)
+- [x] 1.1b Text cleanup (D-018): fix mojibake, drop empty and non-ASCII stories → `tinyllm.data.load_clean` (2,118,859 train / 21,981 val kept)
+- [ ] 1.2 Train a byte-level BPE tokenizer, vocab 8192, with HF `tokenizers`, on `load_clean("train")`
+- [ ] 1.3 Tokenize `load_clean(...)` into `train.bin` / `val.bin` (numpy uint16 memmap, EOS between stories)
 - [ ] 1.4 Sanity: encode→decode roundtrip, total token count, average tokens per story
 
 **Done when:** the roundtrip test passes, token counts are recorded in PROGRESS.md, and the .bin files load with memmap.
