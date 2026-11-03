@@ -32,7 +32,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 
 ## Phase 2 — Model (from scratch)
 - [x] 2.1 `ModelConfig` dataclass (see docs/ARCHITECTURE.md) → `src/tinyllm/config.py`, presets `smoke` / `main`
-- [ ] 2.2 Components: RMSNorm, RoPE, SwiGLU MLP
+- [x] 2.2 Components: RMSNorm, RoPE, SwiGLU MLP → `src/tinyllm/model.py`, `tests/test_components.py`
 - [ ] 2.3 Attention interface plus registry, then the baseline `mha` using `F.scaled_dot_product_attention`
 - [ ] 2.4 Decoder block, full model, tied embeddings, init (std 0.02, residual projections scaled)
 - [ ] 2.5 Tests: output shapes, **causality** (changing a future token doesn't change past logits), param count matches the formula

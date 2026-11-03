@@ -8,7 +8,7 @@ x ─► RMSNorm ─► Attention (swappable) ─► + ─► RMSNorm ─► Swi
 └──────────────── residual ──────────────┘   └──────── residual ─────────┘
 ```
 - Pre-norm with RMSNorm, eps 1e-5
-- RoPE on q and k (theta 10000)
+- RoPE on q and k (theta 10000), in the **rotate_half** layout (channel i is paired with i + head_dim/2), the same as HF Llama. TinyLlama weights then work without permuting q/k. cos/sin tables are precomputed up to `max_seq_len` and aren't saved in checkpoints.
 - SwiGLU: `down(silu(gate(x)) * up(x))`
 - No biases anywhere; input embedding tied to the LM head
 - Final RMSNorm before the LM head

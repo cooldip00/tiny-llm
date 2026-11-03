@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 2 — Model (Phase 1 complete)
-- **Step:** 2.2 Components: RMSNorm, RoPE, SwiGLU MLP
-- **Next action:** write them in `src/tinyllm/model.py`, with unit tests
+- **Step:** 2.3 Attention interface + registry, baseline `mha` with SDPA
+- **Next action:** `src/tinyllm/attention/` (`__init__.py` registry, `mha.py`), with tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,17 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 2.2 components
+- `src/tinyllm/model.py`:
+  - `RMSNorm`: statistic computed in fp32, output in the input dtype.
+  - `RotaryEmbedding` + `apply_rope`: rotate_half (HF Llama) layout, precomputed non-persistent cos/sin, `offset` for KV-cached decode.
+  - `SwiGLU`: HF names `gate_proj` / `up_proj` / `down_proj`, no biases.
+- `tests/test_components.py`, checked against independent references:
+  - RMSNorm matches `F.rms_norm`.
+  - RoPE matches a complex-number reference, is identity at position 0, preserves norms, and gives the same q·k score for the same relative distance (pos 5/2 vs 105/102).
+  - SwiGLU: formula, param count 3·d·ffn, HF names.
+- 41/41 tests pass.
 
 ### 2026-11-03 — Step 2.1 ModelConfig
 - `src/tinyllm/config.py`: frozen `ModelConfig` dataclass.
