@@ -18,11 +18,13 @@ Vocab 8192, context 512 (TinyStories samples are short).
 
 | Name | d_model | n_layers | n_heads | head_dim | ffn_hidden | Params (approx.) |
 |---|---|---|---|---|---|---|
-| `smoke` | 384 | 6 | 6 | 64 | 1024 | ~13.8M |
-| `main` | 512 | 8 | 8 | 64 | 1408 | ~29.9M |
+| `smoke` | 384 | 6 | 6 | 64 | 1024 | 13,767,552 |
+| `main` | 512 | 8 | 8 | 64 | 1408 | 29,893,120 |
 
-Param formula (tied embeddings, MHA): `V·d + L·(4·d² + 3·d·ffn) + small norm params`.
-The causality and param-count tests in Phase 2.5 check against this.
+Param formula (tied embeddings, MHA): `V·d + L·(4·d² + 3·d·ffn + 2·d) + d`. The `2·d` per layer and the final `d` are the RMSNorm weights.
+With GQA, `4·d²` becomes `2·d² + 2·d·kv_dim`. `ModelConfig.estimate_params()` implements this, and the Phase 2.5 test checks the real model against it.
+
+In code: `get_config("main")`, or with overrides such as `get_config("main", n_kv_heads=2)`. Configs are frozen (immutable) and save to and load from dicts for checkpoints.
 
 ## Swappable attention interface
 Every attention variant implements the same module contract:

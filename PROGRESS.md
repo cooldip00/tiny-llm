@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 2 — Model (Phase 1 complete)
-- **Step:** 2.1
-- **Next action:** start Phase 2 per PLAN.md
+- **Step:** 2.2 Components: RMSNorm, RoPE, SwiGLU MLP
+- **Next action:** write them in `src/tinyllm/model.py`, with unit tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,14 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 2.1 ModelConfig
+- `src/tinyllm/config.py`: frozen `ModelConfig` dataclass.
+  - Fields: sizes, `n_kv_heads` (None = MHA), per-layer `layer_types` (None = all `mha`), norm eps, RoPE theta, init std, tied embeddings.
+  - Validation: heads divide d_model; KV heads divide heads; even head_dim for RoPE; layer_types length matches n_layers.
+  - Also: `estimate_params()`, dict round trip for checkpoints, and `get_config(name, **overrides)`.
+- Exact param counts: smoke **13,767,552**, main **29,893,120**. They match the ARCHITECTURE.md estimates.
+- `tests/test_config.py`: 29/29 tests pass in total.
 
 ### 2026-11-03 — Steps 1.3 + 1.4 done, so Phase 1 is complete
 - `tinyllm.data.write_tokens` / `load_tokens`: stream-encode, story + EOS, uint16 written via `.tmp` then renamed; memmap loader.
