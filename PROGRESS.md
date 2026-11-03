@@ -1,9 +1,9 @@
 # Progress
 
 ## Current
-- **Phase:** 2 — Model (Phase 1 complete)
-- **Step:** 2.6 Overfit one batch
-- **Next action:** `scripts/overfit_batch.py`: one fixed batch from `train.bin`, AdamW, loss should drop from ~9.0 to near 0 on the GPU
+- **Phase:** 3 — Training (Phase 2 complete)
+- **Step:** 3.1 Data loader: random fixed-length windows from the memmap, pinned memory
+- **Next action:** `get_batch` in `src/tinyllm/data.py` (or a small loader module), with tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,17 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 2.6 one-batch overfit done, so Phase 2 is complete
+- `scripts/overfit_batch.py`: one fixed batch of 8 × 256 random windows from `train.bin`, AdamW lr 1e-3 (no weight decay), bf16 autocast, 300 steps. Exits non-zero if the final loss is ≥ 0.05.
+
+| Preset | Params | Start loss | Final loss | < 1.0 at step | < 0.05 at step | Time | Peak GPU mem |
+|---|---|---|---|---|---|---|---|
+| smoke | 13.8M | 9.067 | **0.0033** | 118 | 153 | 9.7 s | 727 MiB |
+| main | 29.9M | ~9.0 | **0.0034** | 184 | 209 | 12.3 s | 1213 MiB |
+
+- Start loss ≈ ln(8192) = 9.011, as expected from the init.
+- Phase 2 "Done when" met: all 72 tests pass and the overfit succeeds.
 
 ### 2026-11-03 — Step 2.5 whole-model tests
 - Added to `tests/test_model.py`:
