@@ -61,6 +61,7 @@ class TrainConfig:
     wandb_mode: str = "online"       # "offline" writes to ./wandb; upload later with `wandb sync`
     run_name: str = ""               # default: <preset>
     peak_tflops: float = 42.0        # MFU denominator: theoretical bf16 dense peak (docs/HARDWARE.md)
+    compile: bool = True             # torch.compile the training step, +57% tok/s on main (D-020); eval + samples stay eager
 
     @property
     def tokens_per_step(self) -> int:
@@ -207,12 +208,16 @@ def _loop(cfg, model, opt, rng, tokens, val_tokens, tok, model_cfg, run_dir,
           start, end, best_val, log, logger) -> list[dict]:
     history: list[dict] = []
     flops_per_token = model_cfg.flops_per_token(cfg.seq_len)
+    # The compiled wrapper shares the model's weights. Only the fixed-shape training step uses it:
+    # eval and sampling (a new length every token) would trigger recompiles, and checkpoints
+    # save `model` so state_dict keys never get the `_orig_mod.` prefix.
+    step_model = torch.compile(model) if cfg.compile else model
     t_last, step_last = time.perf_counter(), start - 1
     for step in range(start, end):
         lr = lr_at(step, cfg)
         batches = [get_batch(tokens, cfg.micro_batch, cfg.seq_len, rng, cfg.device)
                    for _ in range(cfg.grad_accum)]
-        loss, grad_norm = train_step(model, opt, batches, lr, cfg.grad_clip)
+        loss, grad_norm = train_step(step_model, opt, batches, lr, cfg.grad_clip)
 
         if step % cfg.log_every == 0 or step == end - 1:
             rec = {"step": step, "loss": loss.item(), "lr": lr, "grad_norm": grad_norm.item()}

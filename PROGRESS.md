@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 3 — Training (Phase 2 complete)
 - **Step:** 3.7 Main run (~30M config, a few hours)
-- **Next action:** set the main run's token budget (~1B tokens ≈ 4.2 h sustained, max_steps ≈ 7,600); decide on `torch.compile` first (PARKING_LOT)
+- **Next action:** launch the main run, `--preset main --max_steps 7600` (~1B tokens, ≈ 2.7 h with compile, D-020)
 - **Blockers:** none (W&B login done 2026-11-03)
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,15 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — `torch.compile` before the main run (D-020)
+- `TrainConfig.compile` (default on, `--no-compile` to disable) compiles only the training step. Eval, samples and checkpoints use the eager model, so there are no recompiles and no `_orig_mod.` keys.
+- First attempt failed: there was no C compiler in WSL, and Triton needs one. You installed `build-essential` (gcc 13.3, SETUP Step 16).
+- Benchmark (main preset, 120 steps, eager → compiled → eager): **72.5K → 114.1K → 70.3K tok/s**. Compiled is **+57%**, MFU 35% → 55.5%. Startup costs ~20 s more.
+- Loss check: the two eager runs with the same seed differ by 0.53 at step 119 (3.82 vs 4.35), because GPU runs aren't bit-reproducible and they pass the early plateau at different times. The compiled run (4.10) falls between them.
+- Tests 99/99 pass, including a new CUDA test (compiled ≈ eager losses, plain checkpoint keys).
+- Main-run estimate: ~2.7 h for 1B tokens, down from ~4.2 h.
+- Next: 3.7 main run.
 
 ### 2026-11-03 — Step 3.6 smoke run
 - W&B login done by the user. Host `api.forge.coreweave.com`, user `cooldip00` (SETUP Step 15).

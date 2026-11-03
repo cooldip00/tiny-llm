@@ -110,3 +110,21 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **First measurement (Step 3.2, 30–40 steps):** smoke ~131K tok/s; main ~74K tok/s (≈ 13 TFLOPS by 6·N·D), so 1B tokens ≈ 3.7 h.
 - **Rejected:** Muon (parked for Phase 5), larger 0.5M-token batches (only ~2,000 steps for 1B tokens, too few updates for a small model).
 - **Revisit** if the smoke run diverges or plateaus early. Change by a new entry, and Phase 5 keeps these values fixed across variants.
+
+### D-020 — `torch.compile` the training step, on by default · ACCEPTED (2026-11-03)
+- **Choice:** `TrainConfig.compile = True` (`--no-compile` turns it off). Only the training forward/backward is compiled. Eval, sampling and checkpoint saving use the eager model, which shares the same weights.
+- **Measured** (main preset, 120 steps each, run in the order eager, compiled, eager so heat-up affects both; mean tok/s from step 40 on):
+
+  | Run | tok/s | MFU | Loss at step 119 |
+  |---|---|---|---|
+  | eager 1 | 72.5K | 35.3% | 3.816 |
+  | **compiled** | **114.1K** | **55.5%** | 4.102 |
+  | eager 2 | 70.3K | 34.2% | 4.346 |
+
+  - Compiled is **+57% tok/s**. Compiling adds ~20 s at startup and again on each `--resume`.
+  - The two eager runs with the same seed already differ by 0.53 in loss at step 119. They pass the early ~5.5 plateau at different times, because GPU kernels aren't bit-reproducible run to run. The compiled loss falls between them, so compile doesn't change the math.
+- **Why it helps:** the model is small (d = 512), so time goes to many small memory-bound kernels (RMSNorm casts, RoPE, SwiGLU, residual adds). Inductor fuses them.
+- **Requires:** a C compiler in WSL (`build-essential`, SETUP Step 16), because Triton builds a small launcher for each kernel.
+- **Guarded by:** a CUDA test that checks compiled losses match eager and that checkpoint keys have no `_orig_mod.` prefix. The CPU tests use eager (`tiny_cfg` sets `compile=False`).
+- **Consequence for Phase 5:** run-to-run noise is large early in training, so ablations need several seeds (as D-013 planned) and should compare late or final val loss, not early steps.
+- **Rejected:** keeping eager as the default (the main run would take ~4.2 h instead of ~2.7 h); compiling eval and sampling too (sampling changes the sequence length each token, which forces recompiles, for little gain).

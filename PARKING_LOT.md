@@ -19,4 +19,4 @@ Format: `- [date] idea — why it's interesting — which phase it might fit`
 - [2026-11-03] Inference engine in C++/Rust — llama.cpp-style learning
 
 ## Added during work
-- [2026-11-03] `torch.compile` on the training step — likely +20–40% tok/s by fusing RMSNorm/RoPE/SwiGLU element-wise ops (MFU is 31–36% today) — before the 3.7 main run if time matters, needs a DECISIONS entry
+- ~~[2026-11-03] `torch.compile` on the training step — likely +20–40% tok/s by fusing RMSNorm/RoPE/SwiGLU element-wise ops (MFU is 31–36% today) — before the 3.7 main run if time matters, needs a DECISIONS entry~~ → done before 3.7: **+57%**, on by default (D-020).

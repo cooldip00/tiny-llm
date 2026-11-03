@@ -229,6 +229,14 @@ Logger choices on the training CLI:
 
 A resumed run (`--resume`) reuses the W&B run ID stored in `ckpt.pt`, so the charts continue in the same run.
 
+## Step 16 — C compiler for `torch.compile` / Triton (before Step 3.7)
+```bash
+sudo apt update && sudo apt install -y build-essential    # run it yourself; type the sudo password only in the terminal
+gcc --version                                             # gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+```
+**Why:** `torch.compile` generates Triton GPU kernels, and Triton compiles a small C launcher for each one. Without `gcc`, it fails with `RuntimeError: Failed to find C compiler`. The Phase 4.10 Triton kernels need it too.
+**Result:** training on the main preset runs +57% faster (D-020). Done 2026-11-03.
+
 ---
 
 ## Notes

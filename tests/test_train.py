@@ -73,7 +73,7 @@ def test_grad_clip_reports_pre_clip_norm_and_clips():
 def tiny_cfg(tmp_path, **kw) -> TrainConfig:
     base = dict(seq_len=32, micro_batch=8, grad_accum=2, max_steps=60, lr=3e-3, min_lr=3e-4,
                 warmup_steps=5, device="cpu", log_every=1, eval_every=10, eval_batches=2,
-                sample_tokens=0, out_dir=str(tmp_path), logger="none")
+                sample_tokens=0, out_dir=str(tmp_path), logger="none", compile=False)
     return TrainConfig(**{**base, **kw})
 
 
@@ -213,3 +213,15 @@ def test_train_loop_cuda_fused_bf16(tmp_path):
     steps = [h for h in hist if "loss" in h]
     assert steps[-1]["loss"] < steps[0]["loss"]
     assert load_checkpoint(tmp_path / "ckpt.pt", "cuda")["step"] == 29
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_compile_matches_eager_and_saves_plain_keys(tmp_path):
+    _, eager = run(tiny_cfg(tmp_path / "eager", max_steps=10, device="cuda"))
+    _, comp = run(tiny_cfg(tmp_path / "comp", max_steps=10, device="cuda", compile=True))
+    le = [h["loss"] for h in eager if "loss" in h]
+    lc = [h["loss"] for h in comp if "loss" in h]
+    assert lc == pytest.approx(le, rel=2e-2)                           # same math, bf16-level drift
+    keys = load_checkpoint(tmp_path / "comp" / "ckpt.pt", "cuda")["model"].keys()
+    assert not any(k.startswith("_orig_mod.") for k in keys)
+    Transformer(TINY).load_state_dict(load_checkpoint(tmp_path / "comp" / "best.pt", "cpu")["model"])
