@@ -4,9 +4,14 @@ Every step that reads TinyStories (tokenizer training, tokenization) goes
 through `load_clean`, so they all see exactly the same text.
 """
 
+from pathlib import Path
+
+import numpy as np
 from datasets import Dataset, load_dataset
 
 DATASET = "roneneldan/TinyStories"
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"  # git-ignored
+TOKEN_DTYPE = np.uint16  # vocab 8192 < 65536 (D-009)
 
 # D-018: TinyStories has UTF-8 punctuation that was decoded as Windows-1252
 # ("mojibake"), e.g. “ -> "â€œ". Map it back to plain ASCII.
@@ -63,3 +68,38 @@ def load_clean(split: str, num_proc: int = 4) -> Dataset:
     assert isinstance(ds, Dataset), f"expected Dataset, got {type(ds).__name__}"
     ds = ds.map(_clean_batch, batched=True, num_proc=num_proc, desc=f"clean {split}")
     return ds.filter(_keep_batch, batched=True, num_proc=num_proc, desc=f"drop {split}")
+
+
+def bin_path(split: str) -> Path:
+    """'train' -> data/train.bin, 'validation' -> data/val.bin"""
+    return DATA_DIR / f"{'val' if split == 'validation' else split}.bin"
+
+
+def write_tokens(split: str, tok, eos_id: int, batch_size: int = 10_000) -> tuple[int, int]:
+    """Encode a cleaned split into one flat uint16 file: story EOS story EOS ...
+
+    Streams batch by batch, so RAM use stays small. Writes to a .tmp file and
+    renames at the end, so a crash never leaves a half-written .bin behind.
+    Returns (n_stories, n_tokens).
+    """
+    ds = load_clean(split)
+    out = bin_path(split)
+    out.parent.mkdir(exist_ok=True)
+    tmp = out.with_suffix(".tmp")
+    n_tokens = 0
+    with open(tmp, "wb") as f:
+        for i in range(0, len(ds), batch_size):
+            encs = tok.encode_batch(ds[i: i + batch_size]["text"])  # Rust, multi-threaded
+            ids = np.fromiter(
+                (t for e in encs for t in (*e.ids, eos_id)), dtype=np.int64
+            )
+            assert ids.max() < np.iinfo(TOKEN_DTYPE).max
+            ids.astype(TOKEN_DTYPE).tofile(f)
+            n_tokens += len(ids)
+    tmp.replace(out)
+    return len(ds), n_tokens
+
+
+def load_tokens(split: str) -> np.memmap:
+    """Memory-map a .bin file: no RAM cost, the OS pages it in on demand."""
+    return np.memmap(bin_path(split), dtype=TOKEN_DTYPE, mode="r")

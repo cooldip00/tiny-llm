@@ -1,9 +1,9 @@
 # Progress
 
 ## Current
-- **Phase:** 1 — Data & tokenizer
-- **Step:** 1.3 Tokenize into `train.bin` / `val.bin`
-- **Next action:** encode `load_clean(...)` with the saved tokenizer, EOS between stories, write a uint16 memmap to `data/`
+- **Phase:** 2 — Model (Phase 1 complete)
+- **Step:** 2.1
+- **Next action:** start Phase 2 per PLAN.md
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,22 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Steps 1.3 + 1.4 done, so Phase 1 is complete
+- `tinyllm.data.write_tokens` / `load_tokens`: stream-encode, story + EOS, uint16 written via `.tmp` then renamed; memmap loader.
+- `scripts/tokenize_data.py` (wall 879 s, peak RAM 2.7 GB):
+
+| Split | Stories | Tokens (incl. EOS) | File | Avg / median / p99 / max tokens per story | Stories > 512 ctx |
+|---|---|---|---|---|---|
+| train | 2,118,859 | **465,373,792** | 930.7 MB | 219 / 187 / 641 / 1576 | 3.05% |
+| val | 21,981 | **4,677,682** | 9.4 MB | 212 / 185 / 622 / 1079 | 2.60% |
+
+- Checks passed: one EOS per story, the file ends with EOS, max id < vocab, and the first, middle and last story decode exactly from the memmap.
+- Tests: 17/17 pass (adds `tests/test_tokens.py`).
+- Implications:
+  - The 1B-token main run is about **2.15 epochs** of train.
+  - Ctx 512 covers about 97% of stories whole. Training samples random 512-token windows across story boundaries (EOS marks the boundary).
+- Possible speed-up (not needed now): encoding was single-core, ~15 min. Parallelize only if we ever re-tokenize often.
 
 ### 2026-11-03 — Step 1.2 tokenizer trained
 - `src/tinyllm/tokenizer.py`: byte-level BPE with a GPT-2-style pre-tokenizer, `add_prefix_space=False` (exact roundtrip), `min_frequency=2`, all 256 bytes in the base alphabet, `<|endoftext|>` = id 0.

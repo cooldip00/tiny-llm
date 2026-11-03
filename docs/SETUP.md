@@ -203,6 +203,16 @@ uv run pytest -q      # run all tests
 **Why hatchling:** the most common, minimal backend that works with a `src/` layout.
 **Result:** `+ tinyllm==0.1.0 (from file:///home/kuladip/llm)`, 8 tests passed.
 
+## Step 14 — Build the training data (Phase 1)
+Run once, in order. Each step reads the output of the one before:
+```bash
+cd ~/llm
+uv run python scripts/train_tokenizer.py   # ~7.5 min, peak RAM 2.7 GB → tokenizer/tinystories-bpe8192.json (committed)
+uv run python scripts/tokenize_data.py     # ~15 min, peak RAM 2.7 GB → data/train.bin (931 MB), data/val.bin (9 MB)
+uv run pytest -q                           # 17 tests
+```
+**Why the tokenizer file is committed but `data/` isn't:** the tokenizer is small (554 KB) and defines what each token ID means, so it must never silently change. The `.bin` files are large and can be rebuilt from the tokenizer plus the dataset.
+
 ---
 
 ## Notes
