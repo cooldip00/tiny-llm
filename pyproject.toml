@@ -1,0 +1,21 @@
+[project]
+name = "tinyllm"
+version = "0.1.0"
+description = "A small Llama-style LLM built from scratch: training, inference engine, attention research"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.14.1",
+    "numpy",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+# PyTorch CUDA 13.0 wheels (D-017). Only torch comes from this index.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }

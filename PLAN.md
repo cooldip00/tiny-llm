@@ -1,0 +1,110 @@
+# Master Plan
+
+Status keys: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (say why in PROGRESS.md)
+
+Each phase ends with **Done when** checks. Don't start the next phase until they pass.
+
+---
+
+## Phase 0 — Environment
+- [x] 0.1 Install WSL2 Ubuntu 24.04 (installed with `--location D:\WSL\Ubuntu-24.04`, because C: only had 38 GB free)
+- [x] 0.2 Inside WSL: `nvidia-smi` shows the RTX 3070 Ti (driver comes from Windows)
+- [x] 0.3 Install `uv`, create the project, pin Python 3.12
+- [x] 0.4 Install PyTorch (2.14.1 + cu130, D-017), check `torch.cuda.is_available()` and bf16 support
+- [ ] 0.5 Benchmark: bf16 matmul TFLOPS and memory bandwidth → record in docs/HARDWARE.md
+- [x] 0.6 Resolve the OPEN decisions in DECISIONS.md (D-013 W&B, D-014 `~/llm`)
+- [x] 0.7 `git init`, add `.gitignore` (data/, checkpoints/, wandb/, *.bin)
+
+**Done when:** `scripts/check_env.py` prints the GPU name, bf16 = True and measured TFLOPS, and the numbers are in HARDWARE.md.
+
+---
+
+## Phase 1 — Data & Tokenizer
+- [ ] 1.1 Download TinyStories (`roneneldan/TinyStories`) with HF `datasets`
+- [ ] 1.2 Train a byte-level BPE tokenizer, vocab 8192, with HF `tokenizers`
+- [ ] 1.3 Tokenize into `train.bin` / `val.bin` (numpy uint16 memmap, EOS between stories)
+- [ ] 1.4 Sanity: encode→decode roundtrip, total token count, average tokens per story
+
+**Done when:** the roundtrip test passes, token counts are recorded in PROGRESS.md, and the .bin files load with memmap.
+
+---
+
+## Phase 2 — Model (from scratch)
+- [ ] 2.1 `ModelConfig` dataclass (see docs/ARCHITECTURE.md)
+- [ ] 2.2 Components: RMSNorm, RoPE, SwiGLU MLP
+- [ ] 2.3 Attention interface plus registry, then the baseline `mha` using `F.scaled_dot_product_attention`
+- [ ] 2.4 Decoder block, full model, tied embeddings, init (std 0.02, residual projections scaled)
+- [ ] 2.5 Tests: output shapes, **causality** (changing a future token doesn't change past logits), param count matches the formula
+- [ ] 2.6 Overfit one batch: loss → ~0 within a few hundred steps
+
+**Done when:** all tests pass and the one-batch overfit succeeds.
+
+---
+
+## Phase 3 — Training
+- [ ] 3.1 Data loader: random fixed-length windows from the memmap, pinned memory
+- [ ] 3.2 Loop: bf16 autocast, AdamW (fused), warmup + cosine LR, grad accumulation, grad clip 1.0
+- [ ] 3.3 Eval every N steps, checkpoint save/resume, sample text at each eval
+- [ ] 3.4 Logging (backend per DECISIONS.md)
+- [ ] 3.5 Throughput: tokens/sec and MFU, logged
+- [ ] 3.6 Smoke run: ~14M config, ~30 min
+- [ ] 3.7 Main run: ~30M config, a few hours (runs while Phase 4 work happens)
+
+**Done when:** the main run's val loss has plateaued, samples are coherent stories, and the final val loss, tokens/sec and MFU are recorded.
+
+---
+
+## Phase 4 — Inference Engine (see docs/INFERENCE.md)
+- [ ] 4.1 Naive generation (recomputes the full sequence each step): baseline tok/s
+- [ ] 4.2 Sampling: temperature, top-k, top-p
+- [ ] 4.3 KV cache: measure the speedup against 4.1
+- [ ] 4.4 Static batching, then continuous batching (simple request scheduler)
+- [ ] 4.5 Toy paged KV-cache allocator (vLLM-style blocks)
+- [ ] 4.6 INT8 weight-only quantization: speed and quality (val loss) delta
+- [ ] 4.7 Speculative decoding: ~14M model drafts for the ~30M model, measure acceptance rate and speedup
+- [ ] 4.8 Export to HF Llama format, then compare against vLLM and llama.cpp (GGUF)
+
+### Track B — Real-scale inference (D-015, D-016)
+- [ ] 4.9 TinyLlama 1.1B in our engine
+  - [ ] 4.9a Implement `gqa` attention (pulled forward from 5.2; TinyLlama uses 4 KV heads)
+  - [ ] 4.9b Load TinyLlama safetensors weights and its tokenizer into our model code
+  - [ ] 4.9c Correctness: our logits match the HF Transformers reference (oracle only, within bf16 tolerance)
+  - [ ] 4.9d Rerun the 4.1–4.6 benchmarks on TinyLlama; report decode tok/s as a % of the bandwidth ceiling
+  - Speculative decoding (4.7) stays on our models only, because the draft model must share TinyLlama's tokenizer
+- [ ] 4.10 Triton kernels — **timeboxed to about half a day, start only after 4.1–4.7 work**
+  - [ ] 4.10a Fused RMSNorm + residual add (first kernel, to learn Triton)
+  - [ ] 4.10b INT8 weight-only GEMV for batch-1 decode (headline kernel)
+  - For each kernel: `allclose` against the PyTorch reference, achieved GB/s as a % of the measured peak, and end-to-end tok/s delta in the engine
+  - Stop after these two. Further kernels go to PARKING_LOT.md
+
+**Done when:** the benchmark tables in docs/INFERENCE.md are filled in for every step (our model, TinyLlama, Triton kernels).
+
+---
+
+## Phase 5 — Research Ablation (see docs/RESEARCH.md)
+- [ ] 5.1 Freeze the fixed-budget config (params, tokens, steps, LR schedule)
+- [ ] 5.2 Implement variants: `mla`, `gdn_hybrid` (via `fla`). `gqa` already exists from 4.9a
+- [ ] 5.3 Run every variant × 2–3 seeds
+- [ ] 5.4 Measure: val loss, KV-cache bytes per token, decode tok/s at 512 / 2k / 8k context
+- [ ] 5.5 Plots and analysis, including threats to validity
+
+**Done when:** the results table in docs/RESEARCH.md is complete and the plots are saved.
+
+---
+
+## Phase 6 — Writeup
+- [ ] 6.1 README: what, why, results, how to reproduce
+- [ ] 6.2 Plots: loss curves, inference speedups, ablation trade-offs
+- [ ] 6.3 3–4 resume bullets with real numbers
+- [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
+
+---
+
+## Rough timeline
+| Block | Phases |
+|---|---|
+| Day 1 morning | 0, 1, 2 |
+| Day 1 midday | 3 (main run starts in the background) |
+| Day 1 afternoon/evening | 4.1–4.8 |
+| Day 2 | 4.9–4.10 (Track B), start 5 |
+| Day 3+ | 5, 6 |

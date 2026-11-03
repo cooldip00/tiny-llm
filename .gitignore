@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Data, tokens, models (never commit)
+data/
+checkpoints/
+*.bin
+*.safetensors
+*.pt
+*.gguf
+
+# Logging
+wandb/
+runs/
+
+# Secrets
+.env
+.netrc
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
