@@ -35,10 +35,14 @@ class Attention(nn.Module):
     def forward(self, x, rope, cache=None) -> Tensor: ...
     # cache: per-layer state object (KV cache for softmax attention,
     #        recurrent state for linear attention). None during training.
-    def cache_bytes_per_token(self) -> int: ...   # used in Phase 5 metrics
+    def cache_bytes_per_token(self, dtype_bytes=2) -> int: ...   # used in Phase 5 metrics
 ```
 
-Registry: `ATTENTION = {"mha": ..., "gqa": ..., "mla": ..., "gdn": ...}`
+`rope` is the `(cos, sin)` pair for the positions in `x`; each variant applies it to q and k itself.
+
+Registry: `ATTENTION = {"mha": ..., "gqa": ..., "mla": ..., "gdn": ...}`. A variant registers with the
+`@register("name")` decorator (duplicates raise), and the model builds each layer with
+`build_attention(cfg, layer_idx)`, which looks up `cfg.layer_types[layer_idx]` (unknown names raise `KeyError`).
 
 Per-layer choice through config, so hybrids work:
 ```python
@@ -67,7 +71,7 @@ Only `mha` and `gqa` export to HF Llama. The other variants are research-only.
 src/tinyllm/
   config.py        # ModelConfig, named presets
   model.py         # RMSNorm, RoPE, MLP, Block, Transformer
-  attention/       # mha.py, gqa.py, mla.py, gdn.py, __init__.py (registry)
+  attention/       # base.py (contract + registry), mha.py, gqa.py, mla.py, gdn.py; __init__.py registers built-ins
   data.py          # dataset loading + text cleanup (D-018), .bin creation, memmap loader
   tokenizer.py     # byte-level BPE 8192: train / load (D-007)
   train.py         # training loop

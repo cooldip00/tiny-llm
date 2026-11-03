@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 2 — Model (Phase 1 complete)
-- **Step:** 2.3 Attention interface + registry, baseline `mha` with SDPA
-- **Next action:** `src/tinyllm/attention/` (`__init__.py` registry, `mha.py`), with tests
+- **Step:** 2.4 Decoder block, full model, tied embeddings, init
+- **Next action:** `Block` + `Transformer` in `src/tinyllm/model.py` (HF names, residual-scaled init), with tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,15 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 2.3 attention interface + `mha`
+- `src/tinyllm/attention/base.py`: `Attention` contract (`forward(x, rope, cache=None)`, `cache_bytes_per_token()`), `ATTENTION` registry, `@register` decorator (duplicates raise), `build_attention(cfg, layer_idx)` (unknown names raise `KeyError` listing the registered ones).
+- `src/tinyllm/attention/mha.py`: `MHA` with HF names `q/k/v/o_proj`, no biases, RoPE on q and k, `F.scaled_dot_product_attention(is_causal=True)`.
+  - Rejects `n_kv_heads != n_heads` (that is `gqa`, Step 4.9a).
+  - `cache` raises `NotImplementedError` until the KV cache in Phase 4.
+  - Cache cost: main = 2048 bytes per token per layer (bf16), 16 KB per token for 8 layers.
+- `tests/test_attention.py`: matches a naive explicit-mask softmax oracle (atol 1e-5); changing tokens 10–15 leaves outputs 0–9 unchanged; registry, HF names, GQA rejection; bf16 autocast on CUDA within 3e-2 of fp32.
+- 52/52 tests pass (CUDA test ran, nothing skipped).
 
 ### 2026-11-03 — Step 2.2 components
 - `src/tinyllm/model.py`:
