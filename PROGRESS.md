@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 2 — Model (Phase 1 complete)
-- **Step:** 2.5 Model tests: shapes, causality, param count vs formula
-- **Next action:** extend `tests/test_model.py`: full-model causality, `num_params()` == `estimate_params()` for both presets, initial loss ≈ ln(8192) ≈ 9.01
+- **Step:** 2.6 Overfit one batch
+- **Next action:** `scripts/overfit_batch.py`: one fixed batch from `train.bin`, AdamW, loss should drop from ~9.0 to near 0 on the GPU
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,16 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 2.5 whole-model tests
+- Added to `tests/test_model.py`:
+  - Shapes at T = 1, 7 and 512 (max).
+  - Causality through all 6 layers: changing the token at position 20 leaves logits 0–19 identical.
+  - `num_params()` == `estimate_params()` for smoke, main, untied, and 3 layers. Exact sizes: smoke 13,767,552, main 29,893,120.
+  - Initial loss within 0.1 of ln(8192) = 9.01, so the init is near-uniform as intended.
+  - Every parameter gets a non-zero gradient (nothing detached or unused).
+  - bf16 autocast on CUDA: bf16 logits, fp32 finite loss ≈ 9.01.
+- 72/72 tests pass.
 
 ### 2026-11-03 — Step 2.4 block + full model
 - `src/tinyllm/model.py`:

@@ -69,3 +69,62 @@ def test_init_std(model):
 def test_rejects_sequence_longer_than_max(model):
     with pytest.raises(ValueError):
         model(torch.zeros(1, CFG.max_seq_len + 1, dtype=torch.long))
+
+
+# ---- Step 2.5: whole-model properties ----
+
+@pytest.mark.parametrize("B,T", [(1, 1), (3, 7), (1, CFG.max_seq_len)])
+def test_shapes_edge_lengths(model, B, T):
+    logits, _ = model(torch.randint(0, CFG.vocab_size, (B, T)))
+    assert logits.shape == (B, T, CFG.vocab_size)
+
+
+def test_causal_through_all_layers(model):
+    idx = torch.randint(0, CFG.vocab_size, (2, 32))
+    idx2 = idx.clone()
+    idx2[:, 20] = (idx2[:, 20] + 1) % CFG.vocab_size  # change one token at position 20
+    with torch.no_grad():
+        a, _ = model(idx)
+        b, _ = model(idx2)
+    torch.testing.assert_close(a[:, :20], b[:, :20])  # earlier positions see nothing
+    assert not torch.allclose(a[:, 20:], b[:, 20:])   # position 20 onward does change
+
+
+@pytest.mark.parametrize("name,overrides", [
+    ("smoke", {}), ("main", {}), ("smoke", {"tie_embeddings": False}), ("smoke", {"n_layers": 3}),
+])
+def test_param_count_matches_formula(name, overrides):
+    cfg = get_config(name, **overrides)
+    assert Transformer(cfg).num_params() == cfg.estimate_params()
+
+
+def test_exact_preset_sizes():
+    assert Transformer(get_config("smoke")).num_params() == 13_767_552
+    assert Transformer(get_config("main")).num_params() == 29_893_120
+
+
+def test_initial_loss_near_uniform(model):
+    # A well-initialised model is almost uniform over the vocab: loss ≈ ln(V) = 9.01.
+    idx = torch.randint(0, CFG.vocab_size, (4, 64))
+    with torch.no_grad():
+        _, loss = model(idx[:, :-1], targets=idx[:, 1:])
+    assert loss.item() == pytest.approx(math.log(CFG.vocab_size), abs=0.1)
+
+
+def test_every_parameter_gets_a_gradient():
+    m = Transformer(CFG)
+    idx = torch.randint(0, CFG.vocab_size, (2, 16))
+    _, loss = m(idx[:, :-1], targets=idx[:, 1:])
+    loss.backward()
+    for name, p in m.named_parameters():
+        assert p.grad is not None and p.grad.abs().sum() > 0, name
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_bf16_autocast_cuda():
+    m = Transformer(CFG).cuda()
+    idx = torch.randint(0, CFG.vocab_size, (2, 128), device="cuda")
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        logits, loss = m(idx[:, :-1], targets=idx[:, 1:])
+    assert logits.dtype == torch.bfloat16 and loss.dtype == torch.float32
+    assert torch.isfinite(loss) and loss.item() == pytest.approx(math.log(CFG.vocab_size), abs=0.1)
