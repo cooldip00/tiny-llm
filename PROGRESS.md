@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 3 — Training (Phase 2 complete)
-- **Step:** 3.1 Data loader: random fixed-length windows from the memmap, pinned memory
-- **Next action:** `get_batch` in `src/tinyllm/data.py` (or a small loader module), with tests
+- **Step:** 3.2 Training loop: bf16 autocast, fused AdamW, warmup + cosine LR, grad accumulation, grad clip 1.0
+- **Next action:** `src/tinyllm/train.py` (`TrainConfig`, LR schedule, step loop), with tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,16 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 3.1 data loader
+- `tinyllm.data.get_batch(tokens, batch_size, seq_len, rng, device)`:
+  - Returns random windows `x = tokens[s:s+T]`, `y = tokens[s+1:s+T+1]` as int64. Sampling is with replacement, and windows cross story boundaries (EOS marks where a story ends).
+  - One vectorised fancy-index gather from the memmap. On CUDA the batch goes through pinned memory with `non_blocking=True`.
+  - The seeded `np.random.Generator` makes runs reproducible. Saving `rng.bit_generator.state` in a checkpoint makes resume exact (tested).
+- Throughput, train memmap to GPU: 16×512 at 6.0 ms (1.4M tok/s); 32×512 at 4.6 ms (**3.6M tok/s**).
+  - Training is expected at ~70K tok/s, so the loader costs ~2% of step time and needs no prefetch thread.
+- `tests/test_batch.py`: shapes/dtype, contiguous windows with y shifted by one, same seed gives the same batch, rng-state resume, both ends of the array reachable with no out-of-range starts, too-short input raises, CUDA device, real `train.bin`.
+- 79/79 tests pass.
 
 ### 2026-11-03 — Step 2.6 one-batch overfit done, so Phase 2 is complete
 - `scripts/overfit_batch.py`: one fixed batch of 8 × 256 random windows from `train.bin`, AdamW lr 1e-3 (no weight decay), bf16 autocast, 300 steps. Exits non-zero if the final loss is ≥ 0.05.

@@ -43,7 +43,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ---
 
 ## Phase 3 — Training
-- [ ] 3.1 Data loader: random fixed-length windows from the memmap, pinned memory
+- [x] 3.1 Data loader: random fixed-length windows from the memmap, pinned memory. `data.get_batch`: 3.6M tokens/s to GPU at 32×512 (~50× what training needs); 79/79 tests pass.
 - [ ] 3.2 Loop: bf16 autocast, AdamW (fused), warmup + cosine LR, grad accumulation, grad clip 1.0
 - [ ] 3.3 Eval every N steps, checkpoint save/resume, sample text at each eval
 - [ ] 3.4 Logging (backend per DECISIONS.md)

@@ -7,6 +7,7 @@ through `load_clean`, so they all see exactly the same text.
 from pathlib import Path
 
 import numpy as np
+import torch
 from datasets import Dataset, load_dataset
 
 DATASET = "roneneldan/TinyStories"
@@ -103,3 +104,27 @@ def write_tokens(split: str, tok, eos_id: int, batch_size: int = 10_000) -> tupl
 def load_tokens(split: str) -> np.memmap:
     """Memory-map a .bin file: no RAM cost, the OS pages it in on demand."""
     return np.memmap(bin_path(split), dtype=TOKEN_DTYPE, mode="r")
+
+
+def get_batch(
+    tokens: np.ndarray,
+    batch_size: int,
+    seq_len: int,
+    rng: np.random.Generator,
+    device: str | torch.device = "cpu",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Random training windows: x = tokens[s : s+T], y = tokens[s+1 : s+T+1].
+
+    Windows start anywhere and cross story boundaries; EOS tells the model where a
+    story ends. Sampling with replacement from a seeded `rng` makes runs reproducible,
+    and saving `rng.bit_generator.state` in a checkpoint makes resume exact.
+    On CUDA the batch goes through pinned memory so the copy can overlap with compute.
+    """
+    if len(tokens) < seq_len + 1:
+        raise ValueError(f"need at least {seq_len + 1} tokens, got {len(tokens)}")
+    starts = rng.integers(0, len(tokens) - seq_len, size=batch_size)    # last valid start: len-T-1
+    idx = starts[:, None] + np.arange(seq_len + 1)                       # (B, T+1)
+    chunk = torch.from_numpy(tokens[idx].astype(np.int64))               # gather, then widen for embedding
+    if torch.device(device).type == "cuda":
+        chunk = chunk.pin_memory().to(device, non_blocking=True)
+    return chunk[:, :-1], chunk[:, 1:]

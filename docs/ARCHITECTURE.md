@@ -78,7 +78,7 @@ src/tinyllm/
   config.py        # ModelConfig, named presets
   model.py         # RMSNorm, RoPE, MLP, Block, Transformer
   attention/       # base.py (contract + registry), mha.py, gqa.py, mla.py, gdn.py; __init__.py registers built-ins
-  data.py          # dataset loading + text cleanup (D-018), .bin creation, memmap loader
+  data.py          # dataset loading + text cleanup (D-018), .bin creation, memmap loader, get_batch
   tokenizer.py     # byte-level BPE 8192: train / load (D-007)
   train.py         # training loop
   generate.py      # sampling + inference engine (Phase 4)
