@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 3 — Training (Phase 2 complete)
-- **Step:** 3.2 Training loop: bf16 autocast, fused AdamW, warmup + cosine LR, grad accumulation, grad clip 1.0
-- **Next action:** `src/tinyllm/train.py` (`TrainConfig`, LR schedule, step loop), with tests
+- **Step:** 3.3 Eval every N steps, checkpoint save/resume, sample text at each eval
+- **Next action:** add `evaluate()` (fixed val batches), `save/load_checkpoint` (model, optimizer, step, rng state, configs) and a sampler to `train.py`, with tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,29 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 3.2 training loop
+- `src/tinyllm/train.py`:
+  - `TrainConfig` dataclass; every field is also a CLI flag (`python -m tinyllm.train --preset main --max_steps 100`).
+  - `lr_at`: linear warmup, then cosine to `min_lr`.
+  - `make_optimizer`: fused AdamW, with decay on 2-D weights only.
+  - `train_step`: gradient accumulation (loss ÷ n micro-batches), bf16 autocast on CUDA, clip at 1.0, and returns device tensors so there's no GPU sync per step.
+  - `train`: the step loop, logging loss / lr / grad norm / tok/s.
+- Hyperparameters recorded as **D-019**: 131,072 tokens/step (32×512 × 8), peak LR 1e-3, warmup 200, cosine to 1e-4, wd 0.1, betas (0.9, 0.95).
+  - My first default had 4 accumulation steps, which is only 65,536 tokens/step. The test caught it, and it's fixed to 8.
+- Short GPU runs (warmup 10):
+
+| Preset | Steps | Loss | Throughput | ≈ TFLOPS (6·N·tok/s) | 1B tokens would take |
+|---|---|---|---|---|---|
+| smoke | 40 | 9.07 → 4.59 | ~131K tok/s | 10.8 | ~2.1 h |
+| main | 30 | 9.09 → 5.60 | ~74K tok/s | 13.3 (~32% of peak) | **~3.7 h** |
+
+- `tests/test_train.py`:
+  - LR schedule values and monotonic decay; optimizer groups (norms not decayed, every param exactly once).
+  - **Grad accumulation 2 × B equals one 2B batch** (SGD, params equal to 1e-6).
+  - Clipping: the reported norm is pre-clip, and the step size equals the clip value.
+  - The CPU loop learns a periodic corpus; seq_len above max raises; CUDA fused + bf16 path.
+- 87/87 tests pass.
 
 ### 2026-11-03 — Step 3.1 data loader
 - `tinyllm.data.get_batch(tokens, batch_size, seq_len, rng, device)`:

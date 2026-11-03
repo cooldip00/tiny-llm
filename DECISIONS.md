@@ -96,3 +96,16 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **Result:** train 2,119,719 → 2,118,859 (860 dropped, 0.04%); val 21,990 → 21,981 (9 dropped). 0 non-ASCII characters left. Tests in `tests/test_data.py`.
 - **Rejected:** keeping the raw text (wastes vocabulary, garbled output); `ftfy`-style generic repair (an extra dependency for a fixed, known set of sequences); guessing at the leftover accented characters (too rare to matter).
 - **Consequence:** the model only ever sees ASCII. That's fine for TinyStories, but revisit for FineWeb-Edu (parked).
+
+### D-019 — Training hyperparameters (defaults in `TrainConfig`) · ACCEPTED (2026-11-03), to be confirmed by the smoke run (3.6)
+- **Batch:** micro-batch 32 × 512 tokens, 8 accumulation steps, so **131,072 tokens per optimizer step**. The 1B-token main run is then ~7,630 steps.
+- **Optimizer:** AdamW, betas (0.9, 0.95), eps 1e-8, fused kernel on CUDA. Weight decay 0.1 on 2-D weights (matrices and the tied embedding), 0 on RMSNorm gains.
+- **LR:** linear warmup over 200 steps to a peak of **1e-3**, then cosine decay to 1e-4 (10% of peak) at `max_steps`.
+- **Other:** gradient clipping at 1.0 (global norm), bf16 autocast with fp32 master weights and fp32 loss, TF32 allowed for leftover fp32 matmuls.
+- **Why:**
+  - The batch and betas follow llama2.c, which trained 15M–110M Llama models on TinyStories with ~131K tokens per step, betas (0.9, 0.95) and clip 1.0.
+  - Peak 1e-3 is higher than the 5e-4/6e-4 used at 100M+ params, because smaller models tolerate and benefit from a higher LR. Warmup and clipping keep the early steps stable.
+  - Beta2 0.95 (not 0.999) reacts faster to loss spikes and is standard for LLM pretraining.
+- **First measurement (Step 3.2, 30–40 steps):** smoke ~131K tok/s; main ~74K tok/s (≈ 13 TFLOPS by 6·N·D), so 1B tokens ≈ 3.7 h.
+- **Rejected:** Muon (parked for Phase 5), larger 0.5M-token batches (only ~2,000 steps for 1B tokens, too few updates for a small model).
+- **Revisit** if the smoke run diverges or plateaus early. Change by a new entry, and Phase 5 keeps these values fixed across variants.
