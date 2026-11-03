@@ -11,7 +11,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [x] 0.2 Inside WSL: `nvidia-smi` shows the RTX 3070 Ti (driver comes from Windows)
 - [x] 0.3 Install `uv`, create the project, pin Python 3.12
 - [x] 0.4 Install PyTorch (2.14.1 + cu130, D-017), check `torch.cuda.is_available()` and bf16 support
-- [ ] 0.5 Benchmark: bf16 matmul TFLOPS and memory bandwidth → record in docs/HARDWARE.md
+- [x] 0.5 Benchmark: bf16 matmul TFLOPS and memory bandwidth → record in docs/HARDWARE.md (39.7 TFLOPS peak GEMM, 38.3 sustained, 423 GB/s read)
 - [x] 0.6 Resolve the OPEN decisions in DECISIONS.md (D-013 W&B, D-014 `~/llm`)
 - [x] 0.7 `git init`, add `.gitignore` (data/, checkpoints/, wandb/, *.bin)
 

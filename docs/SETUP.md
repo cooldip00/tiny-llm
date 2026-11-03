@@ -162,6 +162,15 @@ uv run python -c 'import torch; print(torch.__version__, torch.version.cuda, tor
 - The trial ends around **2026-12-02**. Then downgrade to Free (D-013).
 - `wandb login` happens later, inside WSL. **The API key never goes into the repo or the chat.**
 
+## Step 11 — Benchmark the GPU (Step 0.5)
+```bash
+cd ~/llm
+uv run python scripts/check_env.py        # ~1 min; --sustain 0 skips the 30 s load test
+```
+**Why:** replace the guessed TFLOPS in the plan with real numbers, and get the bandwidth ceiling the inference work is measured against.
+Run it **plugged in, in Nitro performance mode**. On battery the GPU is power-limited and the numbers drop.
+**Result:** bf16 39.7 TFLOPS (n=8192), 38.3 sustained, read bandwidth 423 GB/s. Full table in [HARDWARE.md](HARDWARE.md).
+
 ---
 
 ## Notes

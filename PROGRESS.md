@@ -1,9 +1,9 @@
 # Progress
 
 ## Current
-- **Phase:** 0 — Environment
-- **Step:** 0.5 Benchmark bf16 TFLOPS and memory bandwidth
-- **Next action:** write `scripts/check_env.py`, run it, record the numbers in docs/HARDWARE.md
+- **Phase:** 1 — Data & tokenizer
+- **Step:** 1.1 (Phase 0 complete)
+- **Next action:** start Phase 1 per PLAN.md (download TinyStories)
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,13 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Phase 0.5 done, so Phase 0 is complete
+- Added `scripts/check_env.py`. Ran it plugged in, in performance mode.
+- bf16 GEMM n=8192: **39.7 TFLOPS** (94% of the 42.0 theoretical peak). Sustained 30 s: **38.3 TFLOPS**, 70 → 81 °C, no real throttling.
+- Bandwidth: copy 410 GB/s, read 423 GB/s (rated 448).
+- Training estimate revised to ~12–19 TFLOPS effective, so the main run takes ~2.6–4 h (was 4–5 h).
+- **Next:** Phase 1.
 
 ### 2026-11-03 — Phase 0.3, 0.6, 0.7 done; move to `~/llm`
 - Docs copied to `~/llm` and checked identical with `diff -r`. D-014 accepted.
