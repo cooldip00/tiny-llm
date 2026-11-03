@@ -1,10 +1,10 @@
 # Progress
 
 ## Current
-- **Phase:** 3 — Training (Phase 2 complete)
-- **Step:** 3.7 Main run (~30M config, a few hours)
-- **Next action:** launch the main run, `--preset main --max_steps 7600` (~1B tokens, ≈ 2.7 h with compile, D-020)
-- **Blockers:** none (W&B login done 2026-11-03)
+- **Phase:** 4 — Inference engine (Phase 3 complete)
+- **Step:** 4.1 Naive generation (recomputes the full sequence each step): baseline tok/s
+- **Next action:** read docs/INFERENCE.md, then benchmark naive generation with `checkpoints/main/best.pt`
+- **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
 - **Reminder:** the W&B/Forge trial ends around 2026-12-02. Downgrade to Free then.
@@ -13,6 +13,28 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 3.7 main run · Phase 3 complete
+- Run: `--preset main --max_steps 7600 --run_name main-3.7`, D-019 defaults, compiled (D-020). Logged online: [run `ugd124lz`](https://forge.coreweave.com/wandb/cooldip00-personal/tinyllm/runs/ugd124lz). Log in `checkpoints/main/train.log`.
+- 996M tokens (~2.1 passes over the 465M-token train set) in **2 h 27 min** (14:40 → 17:07 UTC), including 39 evals and samples.
+- Val loss:
+
+  | Step | 0 | 200 | 400 | 1000 | 2000 | 3000 | 4000 | 5000 | 6000 | 7000 | 7599 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | Val | 9.009 | 2.431 | 1.917 | 1.617 | 1.484 | 1.417 | 1.369 | 1.333 | 1.304 | 1.287 | **1.2825** |
+
+  - **Plateaued:** −0.0026 over the last 400 steps, −0.0006 over the last 200, as the LR reached its floor.
+  - Final train loss 1.280 ≈ val 1.2825, so there's no overfitting despite ~2 epochs.
+  - Main vs smoke at the same step 1999: 1.484 vs 1.542. The bigger model is ahead from early on, and its full run ends 0.26 lower than smoke.
+  - This loss isn't directly comparable to llama2.c's numbers, because loss per token depends on the tokenizer (ours is BPE 8192, theirs Llama 32K).
+- Throughput: **115.3K tok/s mean** (111.6–128.3K), **56.1% MFU**, ~23.6 TFLOPS over the whole run. Heat cost only ~3% (vs ~8% eager).
+- Samples ("Once upon a time"):
+  - Step 0: random tokens.
+  - By step 1000: coherent multi-paragraph stories with dialogue.
+  - Final, step 7599: "…a little girl named Lily. She was very curious… she found a shiny rock that looked like it was magic… she saw a butterfly that was also very shiny… found a beautiful park with a big fountain…" The story is fluent and on-topic, with a few loose details ("rock" later becomes "crystal").
+- Checkpoints: `ckpt.pt` 359 MB, `best.pt` 120 MB (git-ignored). `best.pt` is the model for Phase 4.
+- **Phase 3 "Done when" met:** val plateaued, coherent stories, final val loss / tok/s / MFU recorded.
+- Next: Phase 4.1 naive generation baseline.
 
 ### 2026-11-03 — `torch.compile` before the main run (D-020)
 - `TrainConfig.compile` (default on, `--no-compile` to disable) compiles only the training step. Eval, samples and checkpoints use the eager model, so there are no recompiles and no `_orig_mod.` keys.

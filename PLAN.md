@@ -49,7 +49,8 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [x] 3.4 Logging (backend per DECISIONS.md). `src/tinyllm/logger.py`: W&B (online/offline/disabled) or `none`; train/val scalars + a samples table; resume continues the same W&B run; 97/97 tests pass.
 - [x] 3.5 Throughput: tokens/sec and MFU, logged. `ModelConfig.flops_per_token` (PaLM convention); `train/tflops` + `train/mfu` logged. Smoke ~135K tok/s, 13.1 TFLOPS, **31% MFU**; main ~73K tok/s, 15.0 TFLOPS, **35–36% MFU**; 98/98 tests pass.
 - [x] 3.6 Smoke run: ~14M config, ~30 min. 2,000 steps / 262M tokens in 35 min; val 9.03 → **1.542**; coherent stories; sustained ~124K tok/s, 28.6% MFU. W&B run `cel67ssj`.
-- [ ] 3.7 Main run: ~30M config, a few hours (runs while Phase 4 work happens)
+- [x] 3.7 Main run: ~30M config, a few hours (runs while Phase 4 work happens). 7,600 steps / 996M tokens in **2 h 27 min** (compiled); val 9.01 → **1.2825** (plateaued: −0.0026 over the last 400 steps); train 1.280 ≈ val, so no overfitting after ~2.1 epochs; sustained **115K tok/s, 56% MFU**; coherent stories. W&B run `ugd124lz`, weights `checkpoints/main/best.pt`.
+- **Phase 3 done** (2026-11-03): main val 1.2825, 115K tok/s, 56% MFU recorded.
 
 **Done when:** the main run's val loss has plateaued, samples are coherent stories, and the final val loss, tokens/sec and MFU are recorded.
 
