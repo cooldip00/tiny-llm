@@ -2,9 +2,9 @@
 
 ## Current
 - **Phase:** 3 — Training (Phase 2 complete)
-- **Step:** 3.6 Smoke run (~14M config, ~30 min)
-- **Next action:** choose the smoke run's token budget, then run it online to W&B
-- **Blockers:** `uv run wandb login` in WSL, done by you (SETUP Step 15), before 3.6 starts
+- **Step:** 3.7 Main run (~30M config, a few hours)
+- **Next action:** set the main run's token budget (~1B tokens ≈ 4.2 h sustained, max_steps ≈ 7,600); decide on `torch.compile` first (PARKING_LOT)
+- **Blockers:** none (W&B login done 2026-11-03)
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
 - **Reminder:** the W&B/Forge trial ends around 2026-12-02. Downgrade to Free then.
@@ -13,6 +13,25 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 3.6 smoke run
+- W&B login done by the user. Host `api.forge.coreweave.com`, user `cooldip00` (SETUP Step 15).
+- Run: `--preset smoke --run_name smoke-3.6`, default D-019 hyperparameters, 2,000 steps = 262M tokens. Online to W&B: [run `cel67ssj`](https://forge.coreweave.com/wandb/cooldip00-personal/tinyllm/runs/cel67ssj). Log in `checkpoints/smoke/train.log`.
+- Wall clock **35 min** (13:40 → 14:15 UTC), including 11 evals and samples.
+- Val loss:
+
+  | Step | 0 | 200 | 400 | 800 | 1200 | 1600 | 1999 |
+  |---|---|---|---|---|---|---|---|
+  | Val | 9.031 | 2.646 | 2.032 | 1.753 | 1.641 | 1.573 | **1.542** |
+
+  It was still falling slowly at the end (−0.012 over the last 200 steps), so the bigger model and more tokens in 3.7 should help.
+- Throughput: steady at **124K tok/s** (122.6–136.3K), 28.6% MFU. That's ~8% below the 1-minute 3.5 numbers because of thermals. Main estimate becomes ~67K tok/s sustained.
+- Samples ("Once upon a time"):
+  - Step 0: random tokens.
+  - By step 800: coherent short stories.
+  - Final, step 1999: "…she found a shiny coin on the ground… she accidentally dropped the coin in a puddle… a kind lady saw what had happened and helped her… She learned that it's okay to cry, but it's important to be honest and kind." The grammar holds and the story has an arc, with occasional logic slips.
+- Checkpoints: `ckpt.pt` 165 MB, `best.pt` 55 MB (git-ignored).
+- Next: 3.7 main run.
 
 ### 2026-11-03 — Step 3.5 throughput and MFU
 - `ModelConfig.flops_per_token(seq_len)` = 6·N + 12·L·d·T, the PaLM convention.

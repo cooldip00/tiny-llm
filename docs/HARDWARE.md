@@ -45,7 +45,7 @@ Takeaways:
 ## Compute budget
 Training FLOPs ≈ **6 × N (params) × D (tokens)**.
 
-Planning assumption was ~12–19 TFLOPS effective. **Measured in Step 3.5** (PaLM FLOPs convention, vs the 42.0 TFLOPS peak): smoke 13.1 TFLOPS (**31% MFU**, ~135K tok/s), main 15.0 TFLOPS (**36% MFU**, ~73K tok/s). The time estimates below still hold.
+Planning assumption was ~12–19 TFLOPS effective. **Measured in Step 3.5** (PaLM FLOPs convention, vs the 42.0 TFLOPS peak): smoke 13.1 TFLOPS (**31% MFU**, ~135K tok/s), main 15.0 TFLOPS (**36% MFU**, ~73K tok/s). Those are 1-minute numbers. **Sustained over the 35-min smoke run (Step 3.6), throughput is ~8% lower** as the GPU heats up: ~124K tok/s, 28.6% MFU. Expect main at ~67K tok/s sustained, so 1B tokens ≈ 4.2 h.
 
 | Model | Tokens | FLOPs | Est. time |
 |---|---|---|---|

@@ -217,8 +217,10 @@ uv run pytest -q                           # 17 tests
 ```bash
 cd ~/llm
 uv add wandb                 # wandb 0.31.0
-uv run wandb login           # once; paste the API key from wandb.ai/authorize at the prompt
+uv run wandb login           # once; paste the API key at the prompt (input may not echo)
 ```
+**Getting the key (W&B is now CoreWeave Forge):** forge.coreweave.com → profile icon → **User settings** → **API keys** → **Create new key**. The key is shown only once; if it's lost, delete it and make a new one.
+**Check it worked:** `~/.netrc` gets a `machine api.forge.coreweave.com` entry (permissions 600), and `wandb.Api().viewer.username` returns `cooldip00`. Done 2026-11-03.
 **Why:** training metrics and samples go to W&B (D-013). `wandb login` stores the key in `~/.netrc` inside WSL. **Never put the key in the repo, the docs or the chat.**
 Logger choices on the training CLI:
 - `--logger wandb` (the default) with `--wandb_mode online` (the default). Needs the login above.
