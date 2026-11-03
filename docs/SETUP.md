@@ -171,6 +171,17 @@ uv run python scripts/check_env.py        # ~1 min; --sustain 0 skips the 30 s l
 Run it **plugged in, in Nitro performance mode**. On battery the GPU is power-limited and the numbers drop.
 **Result:** bf16 39.7 TFLOPS (n=8192), 38.3 sustained, read bandwidth 423 GB/s. Full table in [HARDWARE.md](HARDWARE.md).
 
+## Step 12 — Data libraries and TinyStories (Step 1.1)
+```bash
+cd ~/llm
+uv add datasets tokenizers                   # datasets 5.1.0, tokenizers 0.23.3 (pyarrow 26.0.0 comes with them)
+uv run python scripts/download_data.py       # downloads into ~/.cache/huggingface, prints stats
+```
+**Why these libraries:** `datasets` downloads the data and caches it as Arrow files, which are memory-mapped so they're RAM-friendly (D-009). `tokenizers` is a fast Rust BPE trainer (D-007). Neither one is a model framework; the model and training code stays ours.
+**Why no version pin:** unlike torch, these don't affect numerical results. `uv.lock` still records the exact versions.
+**Result:** 2,119,719 train / 21,990 val stories. 2.8 GB in the HF cache, outside the repo.
+The "unauthenticated requests" warning is harmless. A HF token only raises the rate limits.
+
 ---
 
 ## Notes

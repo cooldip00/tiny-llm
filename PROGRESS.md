@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 1 — Data & tokenizer
-- **Step:** 1.1 (Phase 0 complete)
-- **Next action:** start Phase 1 per PLAN.md (download TinyStories)
+- **Step:** 1.2 Train the BPE tokenizer
+- **Next action:** look at the non-ASCII characters (6% of stories) to decide on text cleanup, then train BPE with vocab 8192
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,14 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Phase 1.1 done
+- Added `datasets` 5.1.0 and `tokenizers` 0.23.3.
+- `scripts/download_data.py` downloaded `roneneldan/TinyStories` into the HF cache (2.8 GB on disk).
+- Train: 2,119,719 stories, 1.90B characters, average 896 characters, 230 empty stories.
+- Val: 21,990 stories, 19.2M characters, none empty.
+- 6.1% of train stories contain non-ASCII characters. Check what they are before training the tokenizer.
+- Rough estimate: ~4 characters per token gives ~470M train tokens, so the planned 1B-token main run is about 2 epochs.
 
 ### 2026-11-03 — Phase 0.5 done, so Phase 0 is complete
 - Added `scripts/check_env.py`. Ran it plugged in, in performance mode.
