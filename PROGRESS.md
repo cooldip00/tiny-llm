@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 1 — Data & tokenizer
-- **Step:** 1.2 Train the BPE tokenizer
-- **Next action:** train byte-level BPE (vocab 8192) on `load_clean("train")`. The cleanup is done (D-018).
+- **Step:** 1.3 Tokenize into `train.bin` / `val.bin`
+- **Next action:** encode `load_clean(...)` with the saved tokenizer, EOS between stories, write a uint16 memmap to `data/`
 - **Blockers:** none
 - **Open decisions:** none
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
@@ -13,6 +13,15 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-03 — Step 1.2 tokenizer trained
+- `src/tinyllm/tokenizer.py`: byte-level BPE with a GPT-2-style pre-tokenizer, `add_prefix_space=False` (exact roundtrip), `min_frequency=2`, all 256 bytes in the base alphabet, `<|endoftext|>` = id 0.
+- `scripts/train_tokenizer.py` trained on 2,118,859 cleaned train stories in **443 s**, peak RAM **2.7 GB**.
+- Saved to `tokenizer/tinystories-bpe8192.json` (554 KB, committed).
+- Validation: **4,655,701 tokens**, **4.12 chars/token**, **212 tokens/story**, 0 roundtrip mismatches.
+- Train-token estimate: 1.898B chars ÷ 4.12 ≈ **461M tokens**. The exact count comes in 1.3.
+- The last merges learned are whole words (`Ġscooters`, `Ġknives`), so the vocabulary is saturated with real words, not junk.
+- `tests/test_tokenizer.py`: vocab, EOS id, uint16 fit, exact roundtrip (including non-ASCII via bytes), common words are single tokens. 16/16 tests pass in total.
 
 ### 2026-11-03 — Step 1.1b text cleanup (D-018)
 - `scripts/inspect_chars.py` showed that the non-ASCII text is mojibake. Of 130,115 non-ASCII train stories, 129,940 are affected. Top sequences: `â€œ` 270,583; `â€™` 195,201; bare `â€` ~270K (lost closing quote); dashes 15K.
