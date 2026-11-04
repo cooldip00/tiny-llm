@@ -2,13 +2,13 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.1 Naive generation (recomputes the full sequence each step): baseline tok/s
-- **Next action:** read docs/INFERENCE.md, then benchmark naive generation with `checkpoints/main/best.pt`
+- **Step:** 4.2 Sampling: temperature, top-k, top-p (4.1 done)
+- **Next action:** add top-p to `tinyllm.generate.sample` (temperature and top-k exist), with tests
 - **Blockers:** none
 - **Open decisions:** none
 - **Scope (D-021):** **v1-preview** by about 2026-11-11 (4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, first README, public repo); **v1** by about 2026-11-18 (4.4 + 4.5 → 4.8, rest of Phase 6). 4.7 and 4.10 only if ahead. Phase 5 and Phase 7 deferred.
 - **Daily:** ~30 min explaining the day's work out loud (feeds 6.6).
-- **Housekeeping:** push the repo to a public GitHub repo (no remote is set up yet; 20 commits so far).
+- **Housekeeping:** push the repo to a public GitHub repo (no remote is set up yet; 20 commits so far). _Done 2026-11-04: pushed to github.com/cooldip00/tiny-llm, private for now; make it public at v1-preview (6.5a)._
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
 - **Reminder:** the W&B/Forge trial ends around 2026-12-02. Downgrade to Free then.
 
@@ -16,6 +16,16 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.1 naive generation baseline
+- Added `scripts/bench_generate.py`: naive greedy generation (full forward per token, sliding window at 512), INFERENCE.md protocol (prompts 32/128/512, 256 new tokens, batch 1/8/32, 3 warmups, median of 5). Prompts are fixed validation windows. Correctness gate: the timed loop equals `sample(temperature=0)` (OK).
+- Key numbers (`checkpoints/main/best.pt`, full grid in docs/INFERENCE.md):
+  - B=1 P=128: **104 tok/s decode**, TTFT 9.1 ms, peak 199 MiB.
+  - B=8 P=32: 800 tok/s. B=32 P=32: 1,273 tok/s. B=32 P=512: 453 tok/s (70.7 ms/step).
+- Finding: batch 1 is overhead-bound (~10 ms/step at any context length), ~1.5% of the ~7,000 tok/s bandwidth ceiling for 60 MB of bf16 weights at 423 GB/s. Expect 4.3's KV cache to help mostly at long context and large batch, not at B=1.
+- One transient allocator OOM warning in the B=32 P=128 row; a clean rerun matched (873 vs 891 tok/s).
+- Pushed the repo to GitHub (private) before starting.
+- Next: 4.2, add top-p to `sample`, with tests.
 
 ### 2026-11-04 — Scope decision for v1 (D-021)
 - No code changes. Planning only.

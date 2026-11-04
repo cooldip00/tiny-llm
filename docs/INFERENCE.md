@@ -68,7 +68,7 @@ With GQA and 2 KV heads it's 2 MiB. Hence GQA/MLA matter for long context and la
 ## Results (fill in)
 | Step | Batch | Prompt | Decode tok/s | TTFT (ms) | Peak VRAM | Notes |
 |---|---|---|---|---|---|---|
-| 4.1 naive | 1 | 128 | | | | |
+| 4.1 naive | 1 | 128 | 104 | 9.1 | 199 MiB | ~9.6 ms/step, flat across prompt lengths: overhead-bound (see below) |
 | 4.3 KV cache | 1 | 128 | | | | |
 | 4.4 static batch | 8 | 128 | | | | |
 | 4.4 continuous | mixed | mixed | | | | |
@@ -76,6 +76,30 @@ With GQA and 2 KV heads it's 2 MiB. Hence GQA/MLA matter for long context and la
 | 4.7 speculative (k=4) | 1 | 128 | | | | accept rate: |
 | vLLM | 1 / 32 | 128 | | | | |
 | llama.cpp Q8_0 | 1 | 128 | | | | |
+
+### 4.1 naive: full grid (2026-11-04)
+`scripts/bench_generate.py`, `checkpoints/main/best.pt` (29.9M params, val 1.2825), bf16 autocast, greedy, 256 new tokens, median of 5 after 3 warmups. Raw numbers: `runs/bench/4.1_naive.json`. The timed loop is checked against `sample(temperature=0)` before timing.
+
+| Batch | Prompt | TTFT (ms) | Prefill tok/s | Decode tok/s | ms/step | Peak VRAM (MiB) |
+|---|---|---|---|---|---|---|
+| 1 | 32 | 9.75 | 3,281 | 101 | 9.92 | 194 |
+| 1 | 128 | 9.06 | 14,134 | 104 | 9.58 | 199 |
+| 1 | 512* | 10.36 | 49,403 | 97 | 10.33 | 203 |
+| 8 | 32 | 11.02 | 23,223 | 800 | 10.00 | 270 |
+| 8 | 128 | 10.92 | 93,734 | 742 | 10.79 | 298 |
+| 8 | 512* | 18.80 | 217,839 | 446 | 17.95 | 331 |
+| 32 | 32 | 10.29 | 99,484 | 1,273 | 25.13 | 519 |
+| 32 | 128 | 19.44 | 210,668 | 891 | 35.90 | 628 |
+| 32 | 512* | 70.93 | 230,976 | 453 | 70.68 | 777 |
+
+\* prompt + 256 > max_seq_len 512, so the window slides: every step is a full 512-token forward.
+
+Reading (not yet profiled):
+- **Batch 1 is overhead-bound, not bandwidth-bound.** ~10 ms/step whether the context is 32 or 512 tokens. The bf16 weights are ~60 MB, so the bandwidth ceiling at the measured 423 GB/s is ~7,000 tok/s; 104 tok/s is ~1.5% of it. The time is likely Python, kernel launches and autocast re-casting the fp32 weights on every forward.
+- **Consequence for 4.3:** at batch 1 on this small model, a KV cache alone may give little speedup, because the per-step cost is not the attention work. The gain should show at long context and large batch, where the step time does grow (B=32 P=512: 70.7 ms/step). TinyLlama (4.9) is where the bandwidth ceiling becomes the real limit.
+- **Batching helps until compute catches up:** decode tok/s rises ~8× from B=1 to B=8 at P=32 (same ms/step), then ms/step grows with B×context.
+- One transient allocator OOM warning (`free: 0`) appeared during the B=32 P=128 row; nvidia-smi showed 0 MiB in use before and after. A clean rerun gave 873 tok/s decode (vs 891), so the row stands.
+- Ceiling note: the table above still uses the 448 GB/s rated spec; the Phase 0.5 measurement is 423 GB/s, which gives TinyLlama ceilings of ~190 (bf16) and ~380 (INT8) tok/s.
 
 ## Results: TinyLlama 1.1B (fill in)
 | Step | Batch | Prompt | Decode tok/s | % of ceiling | TTFT (ms) | Peak VRAM | Notes |
