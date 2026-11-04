@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.2 Sampling: temperature, top-k, top-p (4.1 done)
-- **Next action:** add top-p to `tinyllm.generate.sample` (temperature and top-k exist), with tests
+- **Step:** 4.3 KV cache: measure the speedup against 4.1 (4.1, 4.2 done)
+- **Next action:** add a per-layer KV cache to attention (prefill once, then decode one token per step with the RoPE offset); gate: greedy output identical to 4.1 naive; then rerun `scripts/bench_generate.py`
 - **Blockers:** none
 - **Open decisions:** none
 - **Scope (D-021):** **v1-preview** by about 2026-11-11 (4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, first README, public repo); **v1** by about 2026-11-18 (4.4 + 4.5 → 4.8, rest of Phase 6). 4.7 and 4.10 only if ahead. Phase 5 and Phase 7 deferred.
@@ -16,6 +16,13 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.2 sampling (temperature, top-k, top-p)
+- Moved the token choice into a pure `generate.sample_next(logits, temperature, top_k, top_p, generator)` (B, V) → (B, 1), so the KV-cache and batching engines (4.3+) reuse it. `sample()` gained `top_p` and calls it; greedy behaviour is unchanged (4.1 gate still OK).
+- Order follows HF: temperature → top-k → top-p. Top-p keeps the smallest set of most likely tokens with mass ≥ p, always including the top token. Invalid `top_k < 1` or `top_p` outside (0, 1] raise.
+- Tests: new `tests/test_generate.py`, 13 tests (known-distribution nucleus sets and renormalised frequency, threshold crossing, top-k then top-p, temperature before top-p, per-row filtering, tiny top-p = greedy end to end, invalid args). Suite: **112 passed**.
+- Found: `test_initial_loss_near_uniform` is unseeded and order-dependent (fails alone). The new test uses `fork_rng` so it doesn't shift the global RNG. Logged in PARKING_LOT, not fixed here.
+- Next: 4.3 KV cache.
 
 ### 2026-11-04 — Step 4.1 naive generation baseline
 - Added `scripts/bench_generate.py`: naive greedy generation (full forward per token, sliding window at 512), INFERENCE.md protocol (prompts 32/128/512, 256 new tokens, batch 1/8/32, 3 warmups, median of 5). Prompts are fixed validation windows. Correctness gate: the timed loop equals `sample(temperature=0)` (OK).

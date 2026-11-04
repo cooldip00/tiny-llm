@@ -20,6 +20,8 @@ Format: `- [date] idea — why it's interesting — which phase it might fit`
 
 ## Added during work
 - ~~[2026-11-03] `torch.compile` on the training step — likely +20–40% tok/s by fusing RMSNorm/RoPE/SwiGLU element-wise ops (MFU is 31–36% today) — before the 3.7 main run if time matters, needs a DECISIONS entry~~ → done before 3.7: **+57%**, on by default (D-020).
+- [2026-11-04] `tests/test_model.py::test_initial_loss_near_uniform` is unseeded, so it depends on global RNG order: it fails when run alone (9.11 vs 9.01 ± 0.1) and passes in the full suite. Seed it, or loosen the tolerance with a reason. Found in 4.2.
+- [2026-11-04] Batch-1 decode is overhead-bound (~10 ms/step, ~1.5% of the bandwidth ceiling, from 4.1). CUDA graphs or `torch.compile(mode="reduce-overhead")` on the decode step, plus keeping bf16 weights instead of autocast re-casting each step, could be the bigger B=1 win than the KV cache. Measure after 4.3; needs a DECISIONS entry.
 
 ## Deferred by D-021 (2026-11-04) — future research, after v1
 These map to PLAN Phase 7. Don't start any of them before v1 ships.
