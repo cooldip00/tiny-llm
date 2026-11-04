@@ -19,7 +19,7 @@ class ModelConfig:
     init_std: float = 0.02
     tie_embeddings: bool = True
     # Attention variant per layer, e.g. ("gdn", "gdn", "gdn", "mha") * 2 for a hybrid.
-    # None = all "mha".
+    # None = all "mha", or all "gqa" when n_kv_heads < n_heads (4.9a).
     layer_types: tuple[str, ...] | None = field(default=None)
 
     def __post_init__(self) -> None:
@@ -27,7 +27,8 @@ class ModelConfig:
         if self.n_kv_heads is None:
             object.__setattr__(self, "n_kv_heads", self.n_heads)
         if self.layer_types is None:
-            object.__setattr__(self, "layer_types", ("mha",) * self.n_layers)
+            default = "gqa" if self.n_kv_heads < self.n_heads else "mha"
+            object.__setattr__(self, "layer_types", (default,) * self.n_layers)
         else:
             object.__setattr__(self, "layer_types", tuple(self.layer_types))
 
@@ -91,7 +92,7 @@ def get_config(name: str, **overrides) -> ModelConfig:
     """A preset with optional overrides, e.g. get_config("main", n_kv_heads=2)."""
     cfg = PRESETS[name]
     if overrides:
-        if "n_layers" in overrides and "layer_types" not in overrides:
-            overrides["layer_types"] = None  # re-derive for the new depth
+        if ("n_layers" in overrides or "n_kv_heads" in overrides) and "layer_types" not in overrides:
+            overrides["layer_types"] = None  # re-derive for the new depth / head layout
         cfg = replace(cfg, **overrides)
     return cfg

@@ -2,5 +2,6 @@
 
 from tinyllm.attention.base import ATTENTION, Attention, build_attention, register
 from tinyllm.attention import mha  # noqa: F401  (registers "mha")
+from tinyllm.attention import gqa  # noqa: F401  (registers "gqa")
 
 __all__ = ["ATTENTION", "Attention", "build_attention", "register"]

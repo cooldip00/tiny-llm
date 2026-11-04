@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.9a `gqa` attention (4.1–4.6 and 4.12 done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
-- **Next action:** `gqa` attention with `n_kv_heads < n_heads` (K/V heads shared across query groups), registered as a layer type next to `mha`; it must equal `mha` when `n_kv_heads == n_heads`, and work with `KVCache` / `SlotKVCache` / `PagedKVCache` (cache shapes use `n_kv_heads`)
+- **Step:** 4.9b load TinyLlama (4.1–4.6, 4.12 and 4.9a done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
+- **Next action:** load TinyLlama 1.1B safetensors weights (bf16 per D-023) and its tokenizer into our `Transformer` (`gqa` layers, 32 query / 4 KV heads, untied embeddings); map HF names, check the config fields (rope_theta, norm_eps, vocab 32000, max_seq_len)
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
@@ -18,6 +18,20 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.9a `gqa` attention
+- `src/tinyllm/attention/gqa.py`, registered as `"gqa"`. `k_proj` / `v_proj` map d → n_kv_heads·hd, so every cache stores only the KV heads (the caches and engines already sized by `n_kv_heads`).
+  - Head order matches HF's `repeat_kv`: query head i reads KV head i // g. That's what TinyLlama's weights expect.
+  - With `n_kv_heads == n_heads` it is exactly `mha` (same names and shapes; an `mha` state dict loads into it).
+- `config.py`: default `layer_types` is `"gqa"` when `n_kv_heads < n_heads`, and `get_config(..., n_kv_heads=…)` re-derives it. Existing configs and checkpoints are unchanged.
+- **Kernel choice, measured** (torch 2.14, TinyLlama heads 32 / 4, hd 64, bf16): SDPA `enable_gqa=True` takes **0.07–0.74×** the time of `repeat_kv` + SDPA, masked cases included, with the same outputs. Copying K/V every decode step is the expensive part (B=32, 512 positions: 1.09 ms vs 0.08 ms). I had expected masks to force the slow path; they don't. `repeat_kv` stays as the test reference.
+- Tests: `tests/test_gqa.py`, 14 tests:
+  - matches a per-head reference loop; equals `mha` exactly at equal heads; HF head order
+  - causal; chunked KV cache == full pass; bf16 CUDA vs reference
+  - cache bytes (1/4 of mha at 2 KV heads); params == `estimate_params`; a training step backprops
+  - model level: `generate` == `sample`; slots and paged engines == solo; `quantize_model` works
+- Suite: **186 passed**.
+- Next: 4.9b load TinyLlama.
 
 ### 2026-11-04 — Step 4.12 benchmark provenance
 - `src/tinyllm/provenance.py`: `Provenance(**extra).start()` / `.finish()` returns a dict of static info (git commit + dirty, python / torch / CUDA / cuDNN, GPU + driver, the weight dtype), plus `before` / `during` / `after` samples.
