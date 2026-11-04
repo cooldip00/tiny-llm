@@ -70,8 +70,10 @@ With GQA and 2 KV heads it's 2 MiB. Hence GQA/MLA matter for long context and la
 |---|---|---|---|---|---|---|
 | 4.1 naive | 1 | 128 | 104 | 9.1 | 199 MiB | ~9.6 ms/step, flat across prompt lengths: overhead-bound (see below) |
 | 4.3 KV cache | 1 | 128 | 97 | 10.7 | 195 MiB | 0.93× vs 4.1 at B=1 (overhead-bound); **3.1×** at B=32 P=128 (see below) |
-| 4.4 static batch | 8 | 128 | | | | |
-| 4.4 continuous | mixed | mixed | | | | |
+| 4.4 static batch | 8 | mixed¹ | 391 | 9,870 (mean, incl. queueing) | 357 MiB | 64-request mixed workload (see below); 32 rows: 1,281 tok/s |
+| 4.4 continuous | 8 slots | mixed | 525 | 6,090 (mean, incl. queueing) | 319 MiB | **1.34×** static at 8, 1.12× at 32 (1,434 tok/s); p95 latency −33% / −27% |
+
+¹ The row was planned as "8 × 128". It was measured on the mixed 64-request workload instead, because equal prompt and output lengths are exactly the case where static and continuous batching do the same work.
 | 4.6 INT8 | 1 | 128 | | | | val loss Δ: |
 | 4.7 speculative (k=4) | 1 | 128 | | | | accept rate: |
 | vLLM | 1 / 32 | 128 | | | | |
@@ -121,6 +123,31 @@ Reading:
   - fp32 (CPU tests): greedy output **identical** to naive `sample()`, including batches, chunked prefill and seeded sampling with top-k/top-p (`tests/test_kv_cache.py`).
   - bf16 (GPU, 8×128 prompts, 256 tokens): 5/8 rows identical; 3 rows diverge at tokens 51, 78 and 239 (81% of tokens equal overall). Teacher-forced on the same tokens, max |logit diff| is 0.125 at a logit scale of 24.1 (about one bf16 step at that size), and argmax agrees on 99.76% of positions. So the divergences are near-ties flipped by bf16 rounding, then compounded by greedy feedback. This meets the reference-answer rule ("identical, or logits within tolerance").
 - **Bug found by the benchmark:** the first version had a reference cycle (cache ↔ per-layer objects), so each finished cache's GPU memory stayed alive until Python's cycle collector ran. Peak VRAM at B=32 P=32 was 2,588 MiB, about 8 caches' worth (3 warmups + 5 runs). After removing the cycle it's 466 MiB, below naive's 519. A test now checks that a cache is freed by refcount alone.
+
+### 4.4 Static vs continuous batching (2026-11-04)
+`scripts/bench_serving.py`, same checkpoint. Raw numbers: `runs/bench/serving.json`. Code: `src/tinyllm/engine.py` (`run_static`, `run_continuous`), `kv_cache.SlotKVCache`.
+
+Workload: 64 requests (seed 0), all queued at t=0 (offline: no arrival process yet). Prompts are validation windows of 33–252 tokens, `max_new_tokens` uniform 16–256 (9,004 tokens in total), greedy, no EOS. Latency and TTFT are measured from engine start, so they include queueing.
+
+| Engine | Size | Useful tok/s | Wall (s) | Latency mean / p95 (s) | TTFT mean / p95 (s) | Decode steps | Row util | KV reserved (MiB) | KV used mean / peak | Peak VRAM (MiB) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| static | 8 | 391 | 23.01 | 11.55 / 22.08 | 9.87 / 20.00 | 1,892 | 59% | 62.6 | 31% / 49% | 357 |
+| continuous | 8 | **525** | 17.14 | **7.94 / 14.79** | 6.09 / 13.05 | 1,295 | **86%** | 64.0 | 41% / 59% | 319 |
+| static | 32 | 1,281 | 7.03 | 3.83 / 6.86 | 1.96 / 3.86 | 510 | 55% | 254.0 | 27% / 39% | 851 |
+| continuous | 32 | **1,434** | 6.28 | **2.79 / 4.99** | 0.85 / 2.62 | 434 | 64% | 256.0 | 31% / 52% | 716 |
+
+How the two engines work:
+- **Static:** take requests in order, B at a time. Left-pad the prompts to the longest and run one prefill. A per-row key mask hides the pad keys. Pad queries may see only themselves, so no softmax row is empty (NaN). Then decode until the batch's *longest* request is done. No per-row RoPE positions are needed: padding shifts every real token of a row equally, and RoPE only sees distances.
+- **Continuous:** S slots in a `SlotKVCache`, each with its own length. Every step, queued requests are admitted into free slots (one batched, padded prefill for all newcomers, copied into their slots). Then all slots decode one token together, each at its own position (per-row RoPE, scatter write, per-slot key mask). A finished request frees its slot at once.
+
+Reading:
+- **Row utilisation explains the gain.** Static computes rows for finished requests until the slowest one in the batch ends: 59% of decode rows were useful at B=8. Continuous refills them: 86%, and 1,295 instead of 1,892 decode steps (−32%).
+- **Throughput gains less than the step count:** 1.34×, not 1.46×. A continuous step costs ~13.2 ms vs ~12.2 ms, because admission prefills run between decode steps and the per-slot mask and scatter add work. Admission is a blocking prefill, so running requests stall while newcomers prefill. Chunked prefill would fix this; it is out of scope here.
+- **At 32 slots the gain shrinks to 1.12×.** 64 requests are only 2 waves of 32, so the run ends in a long drain tail where slots sit empty and nothing is queued (row util 64%). A longer queue or an arrival process would show more. Latency still improves (p95 −27%, mean TTFT 1.96 → 0.85 s).
+- **KV memory is the next waste (→ 4.5).** Every slot reserves `max_seq_len` = 512 positions (8 MiB in bf16) whatever its request needs. On average only 41% (8 slots) and 31% (32 slots) of the reserved KV memory holds real tokens. Static is no better: it reserves `B × (longest prompt + longest output)` per batch. Paged KV allocates fixed-size blocks on demand, so reserved ≈ used, and that memory can hold more concurrent sequences.
+- **Correctness:**
+  - fp32 (CPU tests): both engines give **identical** greedy tokens to each request's solo `generate()`. This covers batch sizes 1/3/8, slot counts 1/3/10 (including more slots than requests), EOS freeing a slot mid-run, and sequences joining a running slot batch at different times (per-step logits checked against the full forward). See `tests/test_engine.py`, 12 tests.
+  - bf16 (GPU): 39–43 of 64 requests are token-identical to solo, depending on the engine. At every divergence, the fp32 top-1/top-2 logit gap of the solo prefix is ≤ 0.076, while the median gap over all generated positions is 1.84 and only 3.9% of positions are below 0.125. So every divergence is a near-tie flipped by bf16 rounding (batched GEMMs pick different kernels than B=1), the same effect as in 4.3. With ~140 tokens per request, a flip somewhere in about a third of requests is expected.
 
 ## Results: TinyLlama 1.1B (fill in)
 | Step | Batch | Prompt | Decode tok/s | % of ceiling | TTFT (ms) | Peak VRAM | Notes |

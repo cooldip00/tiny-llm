@@ -2,10 +2,12 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.6 INT8 weight-only quantization: speed and quality (val loss) delta (4.1–4.3 done; 4.4/4.5 come after v1-preview per D-021)
-- **Next action:** read the 4.6 section of docs/INFERENCE.md, then design per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d
+- **Step:** 4.5 Toy paged KV-cache allocator (4.1–4.4 done; order per D-022: 4.5 → 4.6 → 4.9)
+- **Next action:** block allocator (fixed-size KV blocks, free list, per-sequence block table) behind the same cache protocol as `SlotKVCache`; run `run_continuous` on it with identical outputs; measure reserved vs used KV memory and the max concurrent sequences for a fixed KV budget (4.4 baseline: 31–41% of reserved KV used)
+- **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d
 - **Blockers:** none
 - **Open decisions:** none
+- **Order (D-022):** 4.4 + 4.5 moved before 4.6 (4.1–4.3 finished a day early). Dates unchanged. Checkpoint 2026-11-09: if 4.9 hasn't started, cut scope instead of moving v1-preview.
 - **Scope (D-021):** **v1-preview** by about 2026-11-11 (4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, first README, public repo); **v1** by about 2026-11-18 (4.4 + 4.5 → 4.8, rest of Phase 6). 4.7 and 4.10 only if ahead. Phase 5 and Phase 7 deferred.
 - **Daily:** ~30 min explaining the day's work out loud (feeds 6.6).
 - **Housekeeping:** push the repo to a public GitHub repo (no remote is set up yet; 20 commits so far). _Done 2026-11-04: pushed to github.com/cooldip00/tiny-llm, private for now; make it public at v1-preview (6.5a)._
@@ -16,6 +18,17 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.4 static and continuous batching
+- D-022 accepted: 4.4 + 4.5 before 4.6, dates unchanged.
+- Cache protocol refactor: `begin_step` / `layer(i)` / `end_step`, with the mask logic in `kv_cache.py`. `KVCache(pad_lens=)` adds left padding with a padded causal mask. `SlotKVCache` adds per-slot lengths, `RotaryEmbedding.at(positions)` and scatter writes, with no per-step GPU sync for bookkeeping.
+- `src/tinyllm/engine.py`: `run_static` (left-pad, decode to the longest in the batch) and `run_continuous` (admit into free slots with a batched padded prefill, then one decode step over all slots; release on length or EOS). Both report throughput, latency, TTFT, row utilisation and KV reserved vs used.
+- `scripts/bench_serving.py`, 64 mixed requests: continuous **1.34×** static at 8 (525 vs 391 tok/s, p95 latency 22.1 → 14.8 s, row util 59% → 86%) and **1.12×** at 32 (1,434 vs 1,281 tok/s; 2 waves only, so the drain tail dominates). Only 31–41% of reserved KV holds real tokens, which is 4.5's target.
+- Correctness:
+  - fp32: both engines are identical to solo `generate()` (`tests/test_engine.py`, 12 tests).
+  - bf16: 39–43 of 64 requests are identical. Every divergence is a near-tie: the top-2 gap is ≤ 0.076, against a median of 1.84.
+- Suite: **136 passed**.
+- Next: 4.5 paged KV.
 
 ### 2026-11-04 — Step 4.3 KV cache
 - Added `src/tinyllm/kv_cache.py` (preallocated `[B, n_kv_heads, max_len, head_dim]` per layer, allocated on first use with the layer's dtype), `Transformer.forward(..., cache=)` (RoPE offset = `cache.pos`), MHA cache path with correct masks for prefill / single-token decode / multi-token on a non-empty cache, and `generate.generate()` (prefill once, then one token per step, EOS per row). `bench_generate.py --engine kv`.

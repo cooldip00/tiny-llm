@@ -93,10 +93,12 @@ def test_cached_chunks_match_full_pass(rope_tables):
     cos, sin = rope_tables
     cache = KVCache(n_layers=1, max_len=T)
     outs = []
+    rope = RotaryEmbedding(CFG.head_dim, CFG.max_seq_len, CFG.rope_theta)
     for n in (6, 1, 5, 4):
         s = cache.pos
+        cache.begin_step(n, rope)                            # builds the mask for this chunk
         outs.append(attn(x[:, s:s + n], (cos[s:s + n], sin[s:s + n]), cache.layer(0)))
-        cache.advance(n)
+        cache.end_step(n)
     torch.testing.assert_close(torch.cat(outs, dim=1), attn(x, rope_tables), atol=1e-5, rtol=1e-4)
 
 

@@ -59,6 +59,12 @@ class RotaryEmbedding(nn.Module):
             raise ValueError(f"position {end} exceeds max_seq_len {self.cos.shape[0]}")
         return self.cos[offset:end], self.sin[offset:end]
 
+    def at(self, positions: Tensor) -> tuple[Tensor, Tensor]:
+        """cos/sin for per-row positions (B, T) → (B, 1, T, head_dim), broadcasting over heads.
+        Used when rows sit at different positions (continuous batching, 4.4).
+        No bounds check here (it would force a GPU sync every step): the caller checks."""
+        return self.cos[positions][:, None], self.sin[positions][:, None]
+
 
 def rotate_half(x: Tensor) -> Tensor:
     """[x1, x2] -> [-x2, x1], with x1, x2 the two halves of the last dim."""
@@ -144,16 +150,15 @@ class Transformer(nn.Module):
     def forward(
         self, idx: Tensor, targets: Tensor | None = None, cache=None,
     ) -> tuple[Tensor, Tensor | None]:
-        """cache: a tinyllm.kv_cache.KVCache for incremental decoding (None in training).
-        With a cache, idx holds only the new tokens; their positions start at cache.pos."""
+        """cache: a tinyllm.kv_cache cache for incremental decoding (None in training).
+        With a cache, idx holds only the new tokens; the cache supplies their positions."""
         _, T = idx.shape
-        offset = 0 if cache is None else cache.pos
-        rope = self.rope(T, offset)
+        rope = self.rope(T) if cache is None else cache.begin_step(T, self.rope)
         x = self.embed_tokens(idx)
         for i, layer in enumerate(self.layers):
             x = layer(x, rope, None if cache is None else cache.layer(i))
         if cache is not None:
-            cache.advance(T)
+            cache.end_step(T)
         logits = self.lm_head(self.norm(x))
         loss = None
         if targets is not None:

@@ -149,3 +149,13 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **Consequence:** the Phase 6 writeup says plainly that the ablation is future work. No Phase 5 claims on the resume until it's done.
 - **Rejected:** doing Phase 5 now (weeks of GPU time, not needed for v1); skipping straight to the writeup with training results only (too common to stand out); adding new research tracks before v1 (scope creep; parked instead); a single one-week deadline for everything (too tight for the dependency chain).
 - **Revisit** after v1, or earlier if research becomes the priority (new entry required).
+
+### D-022 — Do 4.4 + 4.5 before 4.6 · ACCEPTED (2026-11-04). Supersedes the step order of D-021 only
+- **Context:** 4.1–4.3 were finished on 2026-11-04, a day ahead of D-021's timeline (which allowed 11-04 → 11-05).
+- **Choice:** new order 4.4 → 4.5 → 4.6 → 4.9a–d → first README + public repo (**v1-preview**) → 4.8 → the rest of Phase 6 (**v1**).
+  - Everything else in D-021 stands: 4.4 and 4.5 together, 4.5 must-do, the optional steps, the deferrals, the slip rule.
+  - Milestone dates stay at about 2026-11-11 (v1-preview) and 2026-11-18 (v1).
+- **Why:** batching and the paged allocator build directly on the KV-cache code that was just written and tested (4.3), so doing them now is cheaper than coming back later. v1-preview also becomes a stronger first result (batching + paged KV + INT8 + TinyLlama).
+- **Risk:** the TinyLlama work (4.9), which carries the bandwidth-ceiling story, moves later.
+- **Revisit on 2026-11-09:** if 4.9 hasn't started by then, cut scope rather than move the date: e.g. ship v1-preview without 4.9 and add it in v1 (new entry required).
+- **Rejected:** keeping D-021's order unchanged (fine too, but it leaves the batching work cold for a week).

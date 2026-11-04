@@ -66,11 +66,12 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - **Optional, only if ahead:** 4.7, 4.10
 - Why 4.4 + 4.5 together: paged KV only pays off when continuous batching mixes requests of different lengths.
 - Why 4.8 is must-do: comparing against vLLM / llama.cpp is what makes every other number credible.
+- **Order update (D-022, 2026-11-04):** 4.1–4.3 finished a day early, so the order is now 4.4 → 4.5 → 4.6 → 4.9a–d → README + public (**v1-preview**, ~11-11) → 4.8 → rest of Phase 6 (**v1**, ~11-18). Dates unchanged.
 
 - [x] 4.1 Naive generation (recomputes the full sequence each step): baseline tok/s (B=1 P=128: 104 tok/s decode; overhead-bound, see docs/INFERENCE.md)
 - [x] 4.2 Sampling: temperature, top-k, top-p (`generate.sample_next`, 13 tests in `tests/test_generate.py`)
 - [x] 4.3 KV cache: measure the speedup against 4.1 (0.93× at B=1, 3.1× at B=32 P=128; see docs/INFERENCE.md)
-- [ ] 4.4 Static batching, then continuous batching (simple request scheduler)
+- [x] 4.4 Static batching, then continuous batching (simple request scheduler). Continuous is 1.34× static at 8 slots and 1.12× at 32, on a 64-request mixed workload (row util 59% → 86%); see docs/INFERENCE.md
 - [ ] 4.5 Toy paged KV-cache allocator (vLLM-style blocks)
 - [ ] 4.6 INT8 weight-only quantization: speed and quality (val loss) delta
 - [ ] 4.7 Speculative decoding: ~14M model drafts for the ~30M model, measure acceptance rate and speedup
@@ -155,6 +156,18 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-08 → 11-11 | 4.9c–d (logits match HF, benchmarks vs the bandwidth ceiling); first README; repo public → **v1-preview** |
 | 2026-11-12 → 11-15 | 4.4 + 4.5 (continuous batching + paged KV) |
 | 2026-11-16 → 11-18 | 4.8 vLLM / llama.cpp comparison; rest of Phase 6 (6.1–6.3, 6.5, 6.6) → **v1** |
+| If ahead | 4.7, 4.10 |
+| After v1 | Phase 5, Phase 7 |
+
+### Revised timeline (D-022, 2026-11-04)
+4.1–4.3 and the GitHub push were done on 2026-11-04. The table above stays as the D-021 plan; this one replaces its order.
+
+| Block | Steps |
+|---|---|
+| 2026-11-04 → 11-06 | 4.4 + 4.5 (static and continuous batching, paged KV) |
+| 2026-11-07 → 11-08 | 4.6 INT8; 4.9a–b (`gqa`, load TinyLlama weights and tokenizer) |
+| 2026-11-09 → 11-11 | 4.9c–d (logits match HF, benchmarks vs the bandwidth ceiling); first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
+| 2026-11-12 → 11-18 | 4.8 vLLM / llama.cpp comparison; rest of Phase 6 (6.1–6.3, 6.5, 6.6) → **v1** |
 | If ahead | 4.7, 4.10 |
 | After v1 | Phase 5, Phase 7 |
 
