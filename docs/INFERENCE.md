@@ -69,7 +69,7 @@ With GQA and 2 KV heads it's 2 MiB. Hence GQA/MLA matter for long context and la
 | Step | Batch | Prompt | Decode tok/s | TTFT (ms) | Peak VRAM | Notes |
 |---|---|---|---|---|---|---|
 | 4.1 naive | 1 | 128 | 104 | 9.1 | 199 MiB | ~9.6 ms/step, flat across prompt lengths: overhead-bound (see below) |
-| 4.3 KV cache | 1 | 128 | | | | |
+| 4.3 KV cache | 1 | 128 | 97 | 10.7 | 195 MiB | 0.93× vs 4.1 at B=1 (overhead-bound); **3.1×** at B=32 P=128 (see below) |
 | 4.4 static batch | 8 | 128 | | | | |
 | 4.4 continuous | mixed | mixed | | | | |
 | 4.6 INT8 | 1 | 128 | | | | val loss Δ: |
@@ -100,6 +100,27 @@ Reading (not yet profiled):
 - **Batching helps until compute catches up:** decode tok/s rises ~8× from B=1 to B=8 at P=32 (same ms/step), then ms/step grows with B×context.
 - One transient allocator OOM warning (`free: 0`) appeared during the B=32 P=128 row; nvidia-smi showed 0 MiB in use before and after. A clean rerun gave 873 tok/s decode (vs 891), so the row stands.
 - Ceiling note: the table above still uses the 448 GB/s rated spec; the Phase 0.5 measurement is 423 GB/s, which gives TinyLlama ceilings of ~190 (bf16) and ~380 (INT8) tok/s.
+
+### 4.3 KV cache: full grid (2026-11-04)
+`scripts/bench_generate.py --engine kv`, same checkpoint and protocol as 4.1. Raw numbers: `runs/bench/kv.json`. Code: `src/tinyllm/kv_cache.py`, `generate.generate()`.
+
+| Batch | Prompt | TTFT (ms) | Prefill tok/s | Decode tok/s | ms/step | Peak VRAM (MiB) | vs 4.1 decode |
+|---|---|---|---|---|---|---|---|
+| 1 | 32 | 10.42 | 3,072 | 97 | 10.27 | 193 | 0.96× |
+| 1 | 128 | 10.65 | 12,024 | 97 | 10.26 | 195 | 0.93× |
+| 8 | 32 | 9.52 | 26,900 | 808 | 9.91 | 253 | 1.01× |
+| 8 | 128 | 10.65 | 96,156 | 831 | 9.62 | 274 | 1.12× |
+| 32 | 32 | 10.22 | 100,212 | 2,976 | 10.75 | 466 | **2.3×** |
+| 32 | 128 | 21.88 | 187,176 | 2,767 | 11.56 | 526 | **3.1×** |
+| any | 512 | — | — | — | — | — | n/a: 512 + 256 > max_seq_len, and a cache can't slide the window (RoPE positions are baked into cached keys) |
+
+Reading:
+- **As predicted by 4.1: no gain at batch 1.** The step time stays ~10 ms, so the work the cache removes was never the bottleneck there. The cache pays off where naive's step time grew with B × context: 3.1× at B=32 P=128.
+- **Now every row is overhead-bound:** ~10–11.5 ms/step from B=1 to B=32. The next B=1 win is cutting per-step overhead (CUDA graphs / `torch.compile`, bf16 weights instead of autocast re-casting; PARKING_LOT), not more attention work.
+- **Correctness:**
+  - fp32 (CPU tests): greedy output **identical** to naive `sample()`, including batches, chunked prefill and seeded sampling with top-k/top-p (`tests/test_kv_cache.py`).
+  - bf16 (GPU, 8×128 prompts, 256 tokens): 5/8 rows identical; 3 rows diverge at tokens 51, 78 and 239 (81% of tokens equal overall). Teacher-forced on the same tokens, max |logit diff| is 0.125 at a logit scale of 24.1 (about one bf16 step at that size), and argmax agrees on 99.76% of positions. So the divergences are near-ties flipped by bf16 rounding, then compounded by greedy feedback. This meets the reference-answer rule ("identical, or logits within tolerance").
+- **Bug found by the benchmark:** the first version had a reference cycle (cache ↔ per-layer objects), so each finished cache's GPU memory stayed alive until Python's cycle collector ran. Peak VRAM at B=32 P=32 was 2,588 MiB, about 8 caches' worth (3 warmups + 5 runs). After removing the cycle it's 466 MiB, below naive's 519. A test now checks that a cache is freed by refcount alone.
 
 ## Results: TinyLlama 1.1B (fill in)
 | Step | Batch | Prompt | Decode tok/s | % of ceiling | TTFT (ms) | Peak VRAM | Notes |

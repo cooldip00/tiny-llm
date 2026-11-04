@@ -69,7 +69,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 
 - [x] 4.1 Naive generation (recomputes the full sequence each step): baseline tok/s (B=1 P=128: 104 tok/s decode; overhead-bound, see docs/INFERENCE.md)
 - [x] 4.2 Sampling: temperature, top-k, top-p (`generate.sample_next`, 13 tests in `tests/test_generate.py`)
-- [ ] 4.3 KV cache: measure the speedup against 4.1
+- [x] 4.3 KV cache: measure the speedup against 4.1 (0.93× at B=1, 3.1× at B=32 P=128; see docs/INFERENCE.md)
 - [ ] 4.4 Static batching, then continuous batching (simple request scheduler)
 - [ ] 4.5 Toy paged KV-cache allocator (vLLM-style blocks)
 - [ ] 4.6 INT8 weight-only quantization: speed and quality (val loss) delta

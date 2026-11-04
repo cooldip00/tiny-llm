@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.3 KV cache: measure the speedup against 4.1 (4.1, 4.2 done)
-- **Next action:** add a per-layer KV cache to attention (prefill once, then decode one token per step with the RoPE offset); gate: greedy output identical to 4.1 naive; then rerun `scripts/bench_generate.py`
+- **Step:** 4.6 INT8 weight-only quantization: speed and quality (val loss) delta (4.1–4.3 done; 4.4/4.5 come after v1-preview per D-021)
+- **Next action:** read the 4.6 section of docs/INFERENCE.md, then design per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d
 - **Blockers:** none
 - **Open decisions:** none
 - **Scope (D-021):** **v1-preview** by about 2026-11-11 (4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, first README, public repo); **v1** by about 2026-11-18 (4.4 + 4.5 → 4.8, rest of Phase 6). 4.7 and 4.10 only if ahead. Phase 5 and Phase 7 deferred.
@@ -16,6 +16,15 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.3 KV cache
+- Added `src/tinyllm/kv_cache.py` (preallocated `[B, n_kv_heads, max_len, head_dim]` per layer, allocated on first use with the layer's dtype), `Transformer.forward(..., cache=)` (RoPE offset = `cache.pos`), MHA cache path with correct masks for prefill / single-token decode / multi-token on a non-empty cache, and `generate.generate()` (prefill once, then one token per step, EOS per row). `bench_generate.py --engine kv`.
+- Speedup vs 4.1 naive: B=1 P=128 **0.93×** (97 tok/s); B=8 P=128 1.12×; B=32 P=32 **2.3×** (2,976 tok/s); B=32 P=128 **3.1×** (2,767 tok/s). P=512 rows n/a (a cache can't slide past max_seq_len).
+- Every row is now ~10–11.5 ms/step: overhead-bound, as 4.1 predicted.
+- Correctness: fp32 greedy identical to naive (tests). bf16: 5/8 rows identical, 3 diverge at tokens 51/78/239; teacher-forced max |logit diff| 0.125 on scale 24.1, argmax agreement 99.76% → bf16 near-ties, within the reference-answer rule.
+- Bug found and fixed: a cache ↔ layer reference cycle kept finished caches alive until gc (B=32 peak 2,588 MiB → 466 MiB after the fix). Test added.
+- Replaced the placeholder `test_cache_not_implemented_yet` with `test_cached_chunks_match_full_pass`. Suite: **124 passed**.
+- Next: 4.6 INT8.
 
 ### 2026-11-04 — Step 4.2 sampling (temperature, top-k, top-p)
 - Moved the token choice into a pure `generate.sample_next(logits, temperature, top_k, top_p, generator)` (B, V) → (B, 1), so the KV-cache and batching engines (4.3+) reuse it. `sample()` gained `top_p` and calls it; greedy behaviour is unchanged (4.1 gate still OK).

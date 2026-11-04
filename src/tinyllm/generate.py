@@ -1,11 +1,15 @@
-"""Text sampling. For now this is the simple version used for samples during training:
-a full forward pass per new token, with no KV cache. The real inference engine
-(KV cache, batching, benchmarks) is built here in Phase 4.
+"""Text generation.
+
+- sample(): naive, a full forward pass over the context per new token (no cache).
+  Used for training samples, and the reference that every faster path must match (4.1).
+- generate(): KV-cached, one prefill pass then one new token per forward (4.3).
+Both choose tokens with sample_next (4.2).
 """
 
 import torch
 from torch import Tensor
 
+from tinyllm.kv_cache import KVCache
 from tinyllm.model import Transformer
 
 
@@ -73,3 +77,51 @@ def sample(
             break
     model.train(was_training)
     return idx
+
+
+@torch.no_grad()
+def generate(
+    model: Transformer,
+    idx: Tensor,
+    max_new_tokens: int,
+    temperature: float = 1.0,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    eos_id: int | None = None,
+    generator: torch.Generator | None = None,
+) -> Tensor:
+    """KV-cached generation. Append up to max_new_tokens to idx (B, T).
+
+    Prefill runs the prompt once and fills the cache; each decode step feeds only the
+    newest token. Stops early once every row has produced eos_id (rows that finish
+    first keep generating; the caller trims after EOS).
+
+    Unlike sample(), the context can't slide: RoPE positions are baked into the cached
+    keys. So prompt + max_new_tokens must fit in max_seq_len.
+    """
+    B, T = idx.shape
+    max_len = model.cfg.max_seq_len
+    if T + max_new_tokens > max_len:
+        raise ValueError(f"prompt {T} + new {max_new_tokens} exceeds max_seq_len {max_len}")
+    was_training = model.training
+    model.eval()
+    cache = KVCache(model.cfg.n_layers, max_len)
+    autocast = dict(device_type=idx.device.type, dtype=torch.bfloat16,
+                    enabled=idx.device.type == "cuda")
+    done = torch.zeros(B, dtype=torch.bool, device=idx.device)
+    out = [idx]
+    with torch.autocast(**autocast):
+        logits, _ = model(idx, cache=cache)                    # prefill
+    for i in range(max_new_tokens):
+        nxt = sample_next(logits[:, -1, :], temperature, top_k, top_p, generator)
+        out.append(nxt)
+        if eos_id is not None:
+            done |= nxt.squeeze(-1) == eos_id
+            if done.all():
+                break
+        if i + 1 == max_new_tokens:
+            break                                              # no forward for a token we won't use
+        with torch.autocast(**autocast):
+            logits, _ = model(nxt, cache=cache)                # decode: one token
+    model.train(was_training)
+    return torch.cat(out, dim=1)

@@ -84,9 +84,20 @@ def test_cache_bytes_per_token():
     assert MHA(get_config("main"), 0).cache_bytes_per_token() == 2048
 
 
-def test_cache_not_implemented_yet(rope_tables):
-    with pytest.raises(NotImplementedError):
-        MHA(CFG, 0)(torch.randn(B, T, CFG.d_model), rope_tables, cache=object())
+def test_cached_chunks_match_full_pass(rope_tables):
+    # 4.3 replaced the old "cache not implemented yet" placeholder test.
+    # Feed 16 tokens as chunks 6 + 1 + 5 + 4 (prefill, decode, two multi-token steps).
+    from tinyllm.kv_cache import KVCache
+    attn = MHA(CFG, 0)
+    x = torch.randn(B, T, CFG.d_model)
+    cos, sin = rope_tables
+    cache = KVCache(n_layers=1, max_len=T)
+    outs = []
+    for n in (6, 1, 5, 4):
+        s = cache.pos
+        outs.append(attn(x[:, s:s + n], (cos[s:s + n], sin[s:s + n]), cache.layer(0)))
+        cache.advance(n)
+    torch.testing.assert_close(torch.cat(outs, dim=1), attn(x, rope_tables), atol=1e-5, rtol=1e-4)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")

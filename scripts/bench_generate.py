@@ -13,7 +13,10 @@ Prompts are real validation text (fixed offsets), so the outputs can serve as th
 greedy-identical reference for 4.2+. The timed loop is checked against
 tinyllm.generate.sample(temperature=0) before any timing.
 
-    uv run python scripts/bench_generate.py [--ckpt checkpoints/main/best.pt]
+    uv run python scripts/bench_generate.py [--engine naive|kv] [--ckpt checkpoints/main/best.pt]
+
+Step 4.3 adds --engine kv (KV cache: one prefill, then one token per forward). It skips
+rows where prompt + new tokens exceed max_seq_len, since a cache can't slide the window.
 """
 
 import argparse
@@ -27,7 +30,8 @@ import torch
 
 from tinyllm.config import ModelConfig
 from tinyllm.data import load_tokens
-from tinyllm.generate import sample
+from tinyllm.generate import generate, sample
+from tinyllm.kv_cache import KVCache
 from tinyllm.model import Transformer
 from tinyllm.train import load_checkpoint
 
@@ -67,14 +71,68 @@ def naive_greedy(model: Transformer, prompt: torch.Tensor, new_tokens: int):
     return idx, t_first - t0, time.perf_counter() - t_first
 
 
-def bench(model, batch, prompt_len, new_tokens, warmup, repeats, device) -> dict:
+@torch.no_grad()
+def kv_greedy(model: Transformer, prompt: torch.Tensor, new_tokens: int):
+    """Same computation as generate(temperature=0), timed the same way as naive_greedy."""
+    cache = KVCache(model.cfg.n_layers, model.cfg.max_seq_len)
+    out = [prompt]
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    t_first = t0
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        logits, _ = model(prompt, cache=cache)
+    for i in range(new_tokens):
+        nxt = logits[:, -1, :].float().argmax(dim=-1, keepdim=True)
+        out.append(nxt)
+        if i == 0:
+            torch.cuda.synchronize()
+            t_first = time.perf_counter()
+        if i + 1 == new_tokens:
+            break
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            logits, _ = model(nxt, cache=cache)
+    torch.cuda.synchronize()
+    return torch.cat(out, dim=1), t_first - t0, time.perf_counter() - t_first
+
+
+ENGINES = {"naive": naive_greedy, "kv": kv_greedy}
+
+
+def kv_vs_naive(model, device) -> str:
+    """bf16 reference check (INFERENCE.md rule): greedy tokens, then logits, against naive."""
+    prompts = make_prompts(8, 128, device)
+    kv = kv_greedy(model, prompts, 256)[0][:, 128:]
+    naive = naive_greedy(model, prompts, 256)[0][:, 128:]
+    same = (kv == naive)
+    first_diff = [int((~row).nonzero()[0]) if (~row).any() else None for row in same]
+    # Logits on naive's own tokens, so a single flipped token doesn't cascade.
+    seq = naive_greedy(model, prompts, 256)[0]
+    cache = KVCache(model.cfg.n_layers, model.cfg.max_seq_len)
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        full = model(seq)[0][:, 127:-1].float()
+        cached = [model(seq[:, :128], cache=cache)[0][:, -1:]]
+        cached += [model(seq[:, t:t + 1], cache=cache)[0] for t in range(128, seq.shape[1] - 1)]
+    cached = torch.cat(cached, dim=1).float()
+    err = (cached - full).abs().max().item()
+    argmax_agree = (cached.argmax(-1) == full.argmax(-1)).float().mean().item()
+    return (f"kv vs naive (8x128 prompts, 256 tokens, bf16): tokens identical {same.all(1).sum()}/8 rows, "
+            f"{same.float().mean():.2%} of tokens; first divergence per row {first_diff}; "
+            f"teacher-forced max |logit diff| {err:.3f} (logit scale {full.abs().max():.1f}), "
+            f"argmax agreement {argmax_agree:.2%}")
+
+
+def bench(model, engine, batch, prompt_len, new_tokens, warmup, repeats, device) -> dict:
+    run = ENGINES[engine]
+    if engine == "kv" and prompt_len + new_tokens > model.cfg.max_seq_len:
+        return {"batch": batch, "prompt_len": prompt_len, "new_tokens": new_tokens,
+                "skipped": "prompt + new exceeds max_seq_len (no sliding window with a cache)"}
     prompt = make_prompts(batch, prompt_len, device)
     for _ in range(warmup):
-        naive_greedy(model, prompt, new_tokens)
+        run(model, prompt, new_tokens)
     torch.cuda.reset_peak_memory_stats()
     ttfts, decodes = [], []
     for _ in range(repeats):
-        _, ttft, dec = naive_greedy(model, prompt, new_tokens)
+        _, ttft, dec = run(model, prompt, new_tokens)
         ttfts.append(ttft)
         decodes.append(dec)
     ttft, dec = statistics.median(ttfts), statistics.median(decodes)
@@ -97,8 +155,10 @@ def main() -> None:
     p.add_argument("--new-tokens", type=int, default=256)
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--repeats", type=int, default=5)
-    p.add_argument("--out", default="runs/bench/4.1_naive.json")
+    p.add_argument("--engine", choices=sorted(ENGINES), default="naive")
+    p.add_argument("--out", default=None, help="default: runs/bench/<engine>.json")
     args = p.parse_args()
+    args.out = args.out or f"runs/bench/{args.engine}.json"
     device = "cuda"
 
     model = load_model(Path(args.ckpt), device)
@@ -112,12 +172,21 @@ def main() -> None:
     ref = sample(model, check, 64, temperature=0)
     assert torch.equal(ours, ref), "timed loop diverges from sample(temperature=0)"
     print("check: timed loop == sample(temperature=0) on 2x32 prompt, 64 tokens: OK")
+    if args.engine == "kv":
+        kv_check = kv_greedy(model, check, 64)[0]
+        assert torch.equal(kv_check, generate(model, check, 64, temperature=0)), \
+            "timed kv loop diverges from generate(temperature=0)"
+        print("check: timed kv loop == generate(temperature=0): OK")
+        print("check:", kv_vs_naive(model, device))
 
     rows = []
     for b in map(int, args.batch_sizes.split(",")):
         for plen in map(int, args.prompt_lens.split(",")):
-            r = bench(model, b, plen, args.new_tokens, args.warmup, args.repeats, device)
+            r = bench(model, args.engine, b, plen, args.new_tokens, args.warmup, args.repeats, device)
             rows.append(r)
+            if "skipped" in r:
+                print(f"B={b:>2} P={plen:>3} | skipped: {r['skipped']}", flush=True)
+                continue
             print(f"B={b:>2} P={plen:>3} | TTFT {r['ttft_ms']:7.2f} ms | "
                   f"prefill {r['prefill_tok_s']:9.0f} tok/s | decode {r['decode_tok_s']:7.0f} tok/s "
                   f"({r['ms_per_step']:.2f} ms/step) | peak {r['peak_vram_mib']:6.0f} MiB"
@@ -125,7 +194,7 @@ def main() -> None:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"ckpt": args.ckpt, "gpu": torch.cuda.get_device_name(),
+    out.write_text(json.dumps({"engine": args.engine, "ckpt": args.ckpt, "gpu": torch.cuda.get_device_name(),
                                "torch": torch.__version__, "rows": rows}, indent=2))
     print(f"wrote {out}")
 

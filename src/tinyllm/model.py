@@ -141,12 +141,19 @@ class Transformer(nn.Module):
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())  # a tied matrix is counted once
 
-    def forward(self, idx: Tensor, targets: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
+    def forward(
+        self, idx: Tensor, targets: Tensor | None = None, cache=None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """cache: a tinyllm.kv_cache.KVCache for incremental decoding (None in training).
+        With a cache, idx holds only the new tokens; their positions start at cache.pos."""
         _, T = idx.shape
-        rope = self.rope(T)
+        offset = 0 if cache is None else cache.pos
+        rope = self.rope(T, offset)
         x = self.embed_tokens(idx)
-        for layer in self.layers:
-            x = layer(x, rope)
+        for i, layer in enumerate(self.layers):
+            x = layer(x, rope, None if cache is None else cache.layer(i))
+        if cache is not None:
+            cache.advance(T)
         logits = self.lm_head(self.norm(x))
         loss = None
         if targets is not None:
