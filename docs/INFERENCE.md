@@ -72,14 +72,13 @@ With GQA and 2 KV heads it's 2 MiB. Hence GQA/MLA matter for long context and la
 | 4.3 KV cache | 1 | 128 | 97 | 10.7 | 195 MiB | 0.93× vs 4.1 at B=1 (overhead-bound); **3.1×** at B=32 P=128 (see below) |
 | 4.4 static batch | 8 | mixed¹ | 391 | 9,870 (mean, incl. queueing) | 357 MiB | 64-request mixed workload (see below); 32 rows: 1,281 tok/s |
 | 4.4 continuous | 8 slots | mixed | 525 | 6,090 (mean, incl. queueing) | 319 MiB | **1.34×** static at 8, 1.12× at 32 (1,434 tok/s); p95 latency −33% / −27% |
-
 | 4.5 paged KV (block 16) | 32 slots | mixed | 924 (vs 633 for 8 slots, same run) | 2,580 (mean, incl. queueing) | 458 MiB | **same 64 MiB of KV** as 8 slots: **1.46×**, 25 sequences at once instead of 8; 97% of claimed KV holds real tokens (vs 52%) |
-
-¹ The row was planned as "8 × 128". It was measured on the mixed 64-request workload instead, because equal prompt and output lengths are exactly the case where static and continuous batching do the same work.
-| 4.6 INT8 | 1 | 128 | | | | val loss Δ: |
+| 4.6 INT8 | 1 | 128 | 82 (vs 106 fp32, 135 bf16 weights; same run) | 12.4 | weights: matmul 28.7 MiB (vs 57 bf16) | val loss Δ: **+0.0001** (1.2825 → 1.2826). **0.78×** speed at B=1: overhead-bound, and three PyTorch ops per Linear (see 4.6 below) |
 | 4.7 speculative (k=4) | 1 | 128 | | | | accept rate: |
 | vLLM | 1 / 32 | 128 | | | | |
 | llama.cpp Q8_0 | 1 | 128 | | | | |
+
+¹ The row was planned as "8 × 128". It was measured on the mixed 64-request workload instead, because equal prompt and output lengths are exactly the case where static and continuous batching do the same work.
 
 ### 4.1 naive: full grid (2026-11-04)
 `scripts/bench_generate.py`, `checkpoints/main/best.pt` (29.9M params, val 1.2825), bf16 autocast, greedy, 256 new tokens, median of 5 after 3 warmups. Raw numbers: `runs/bench/4.1_naive.json`. The timed loop is checked against `sample(temperature=0)` before timing.
@@ -187,6 +186,57 @@ Reading:
 - **Correctness:**
   - fp32 (CPU tests, `tests/test_paged_kv.py`, 12 tests): allocator alloc/free/reuse, and double free raises. Paged decode logits equal the full forward with a padded joint prefill, a late joiner and block boundaries crossed. `run_continuous(kv="paged")` is identical to solo `generate()` for slots 1/3/10 and blocks 4/8/16, including a tiny budget that forces preemption. No blocks are leaked at the end.
   - bf16 (GPU): 38–49 of 64 requests are identical to solo. On the block-16, 32-slot run (42 preemptions), every divergence is a near-tie (fp32 top-2 gap ≤ 0.076, against a median of 1.84), as in 4.3 and 4.4.
+
+### 4.6 INT8 weight-only quantization (2026-11-04)
+`scripts/bench_quant.py`, `checkpoints/main/best.pt`. Raw numbers: `runs/bench/int8.json`. Code: `src/tinyllm/quant.py`.
+
+Method:
+- **Scales:** per output channel, symmetric absmax: `s_j = max|W_j| / 127`, `q_j = round(W_j / s_j)` clipped to ±127. Activations stay floating point (W8A16).
+- **Forward:** `F.linear(x, q.to(bf16)) * s`. The scale factors out of the matmul exactly. The int8 → bf16 cast is exact (|q| ≤ 127).
+- **What is quantized:** all 57 Linears (q/k/v/o and gate/up/down × 8 layers, plus `lm_head`). With tied embeddings, `lm_head` gets its own int8 copy; the embedding table stays float, because a lookup reads only B rows per step.
+
+Three variants of the same weights, all under bf16 autocast:
+- **fp32:** fp32-stored weights, which autocast recasts to bf16 at every matmul (the engine so far).
+- **bf16:** weights stored in bf16.
+- **int8:** as above; embedding and norms stay fp32.
+
+Quality:
+
+| Variant | Val loss (20 × 32 × 512 tokens) | Argmax agreement with plain fp32 | Mean KL vs plain fp32 (nats) | Largest top-1 margin at a flip | Greedy rows identical to fp32+autocast |
+|---|---|---|---|---|---|
+| fp32 + autocast | 1.2825 | 99.34% | 1.1e-4 | 0.066 | (reference) |
+| bf16 weights | 1.2826 | 99.34% | 1.3e-4 | 0.097 | 4 / 32 |
+| int8 | 1.2826 (**Δ +0.0001**) | 99.08% | 2.3e-4 | 0.102 | 0 / 32 |
+
+The agreement and KL columns are teacher-forced on 32 sequences (128 val tokens + 256 greedy tokens), against the same model in plain fp32 with no autocast. The median top-1 margin is 1.70 nats.
+
+Speed: KV engine, P=128, 256 new tokens, median of 5 per round, 3 interleaved rounds (median round shown).
+
+| Batch | fp32 + autocast tok/s (ms/step) | bf16 weights | int8 | int8 / fp32 | Rounds fp32 / bf16 / int8 |
+|---|---|---|---|---|---|
+| 1 | 106 (9.43) | 135 (7.39) | 82 (12.12) | **0.78×** | 103–111 / 126–144 / 82–87 |
+| 8 | 865 (9.25) | 1,042 (7.68) | 735 (10.89) | 0.85× | 847–876 / 994–1,060 / 706–735 |
+| 32 | 3,275 (9.77) | 4,287 (7.46) | 3,020 (10.60) | 0.92× | 3,169–3,658 / 3,898–4,419 / 2,988–3,040 |
+
+Stored weights: fp32 114 MiB, bf16 57 MiB. INT8 is 28.7 MiB of matmul weights (int8 + fp32 scales) plus the untied 16 MiB fp32 embedding, 44.7 MiB in all (36.7 if the embedding were bf16).
+
+Reading:
+- **Quality is free at this size.** The val loss change is +0.0001, the same as merely storing in bf16. INT8 flips about twice as many argmaxes as bf16 (0.92% vs 0.66% of positions), and every flip is a near-tie (margin ≤ 0.10 nats, median 1.70). Per-channel scales are enough; nothing needed per-group scales or outlier handling.
+- **Speed: INT8 is slower here, as predicted.**
+  - A step takes ~9.5 ms at every batch size. Reading 57 MiB of bf16 weights at 423 GB/s takes ~0.14 ms, about 1.5% of that. So even a perfect INT8 kernel could save at most ~0.07 ms per step on this model.
+  - What INT8 adds is ops. An `Int8Linear` is three PyTorch ops (cast, matmul, scale) plus Python dispatch, against two (autocast cast + matmul) for fp32 and one for bf16. That's +2.7 ms per step over 57 layers, likely mostly Python and launch overhead (not profiled).
+- **Even when bandwidth-bound, cast-then-matmul loses to bf16.** Per weight per step:
+  - fp32 + autocast moves ~8 bytes (read 4 + write 2 for the cast, read 2 for the matmul).
+  - int8 + cast moves ~5 bytes (read 1, write 2, read 2).
+  - bf16 moves 2 bytes.
+  - So INT8 only beats bf16 when the matmul reads int8 directly and dequantizes in registers. That is the 4.10b fused GEMV; the 4.9d rerun on TinyLlama (2.2 GB bf16, truly bandwidth-bound) is the real test.
+- **Side finding: storing weights in bf16 is worth 1.20–1.31× today,** at no quality cost. The engine has paid an fp32 → bf16 cast of every weight on every step since 4.1. This was measured for the PARKING_LOT B=1 item. Making it the default changes the engine, so it needs a DECISIONS entry first. The 4.1–4.5 numbers above are all fp32 + autocast.
+- **Correctness** (`tests/test_quant.py`, 16 tests, fp32 CPU):
+  - Rounding error is ≤ half a step per element, and an all-zero row gives zeros, not NaN.
+  - `Int8Linear` equals `F.linear` on the dequantized weight, and every Linear is replaced, for tied and untied embeddings.
+  - Matmul bytes are exactly 1 per weight + 4 per row.
+  - KV-cached `generate()` equals naive `sample()`, and `run_continuous` (slots and paged) equals solo `generate()`, all on the quantized model.
+  - The GPU timed loop equals `generate(temperature=0)` on the int8 model.
 
 ## Results: TinyLlama 1.1B (fill in)
 | Step | Batch | Prompt | Decode tok/s | % of ceiling | TTFT (ms) | Peak VRAM | Notes |

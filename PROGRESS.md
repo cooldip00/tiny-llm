@@ -2,9 +2,9 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.6 INT8 weight quantization (4.1–4.5 done; order per D-022: 4.6 → 4.9a–d → README + public)
-- **Next action:** per-channel symmetric INT8 for the Linear weights (dequantize in the matmul), then val loss Δ vs bf16 and decode tok/s at B=1 / B=32
-- **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d
+- **Step:** 4.9a `gqa` attention (4.1–4.6 done; order per D-022: 4.9a–d → README + public)
+- **Next action:** `gqa` attention with `n_kv_heads < n_heads` (K/V heads shared across query groups), registered as a layer type next to `mha`; it must equal `mha` when `n_kv_heads == n_heads`, and work with `KVCache` / `SlotKVCache` / `PagedKVCache` (cache shapes use `n_kv_heads`)
+- **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
 - **Order (D-022):** 4.4 + 4.5 moved before 4.6 (4.1–4.3 finished a day early). Dates unchanged. Checkpoint 2026-11-09: if 4.9 hasn't started, cut scope instead of moving v1-preview.
@@ -18,6 +18,19 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.6 INT8 weight-only quantization
+- `src/tinyllm/quant.py`: per-output-channel symmetric absmax INT8 (`quantize_per_channel`, `Int8Linear`, `quantize_model`, `weight_bytes`).
+  - Forward: `F.linear(x, q.to(bf16)) * scale`. The scale factors out of the matmul exactly.
+  - All 57 Linears are quantized, including `lm_head`. With tied embeddings, `lm_head` gets its own int8 copy and the embedding stays float.
+- `scripts/bench_quant.py` compares three variants of `best.pt`: fp32 + autocast (the engine so far), bf16-stored weights, and int8.
+  - **Quality:** val loss 1.2825 → 1.2826 (**Δ +0.0001**, same as bf16). Argmax agreement with plain fp32: 99.08%, vs 99.34% for bf16. Every flip is a near-tie (margin ≤ 0.10 nats; median 1.70).
+  - **Memory:** matmul weights 57 → 28.7 MiB (−50%).
+  - **Speed:** INT8 is **slower**: 0.78× / 0.85× / 0.92× fp32 at B=1 / 8 / 32 (82 vs 106 tok/s at B=1). The cast + matmul + scale is three ops per Linear in PyTorch, and decode here is overhead-bound (weight reads are ~2% of a step). As expected in the plan; the fused GEMV (4.10b) and TinyLlama (4.9d) are where INT8 can pay off.
+  - **Side finding:** bf16-stored weights are **1.20–1.31×** fp32 + autocast at the same quality, measured for the PARKING_LOT B=1 item. Not adopted yet; needs a DECISIONS entry.
+- Suite: **166 passed** (16 new in `tests/test_quant.py`).
+- Also fixed the INFERENCE results table: the 4.4 footnote and the 4.5 row had split it in two.
+- Next: 4.9a `gqa`.
 
 ### 2026-11-04 — Step 4.5 paged KV cache
 - `src/tinyllm/paged_kv.py`:

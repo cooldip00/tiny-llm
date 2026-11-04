@@ -73,7 +73,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [x] 4.3 KV cache: measure the speedup against 4.1 (0.93× at B=1, 3.1× at B=32 P=128; see docs/INFERENCE.md)
 - [x] 4.4 Static batching, then continuous batching (simple request scheduler). Continuous is 1.34× static at 8 slots and 1.12× at 32, on a 64-request mixed workload (row util 59% → 86%); see docs/INFERENCE.md
 - [x] 4.5 Toy paged KV-cache allocator (vLLM-style blocks). With the same 64 MiB of KV as 8 contiguous slots, it runs 25 sequences at once and 1.46× the throughput; 97% of claimed KV holds tokens (vs 52%). The gather costs ~7%. See docs/INFERENCE.md
-- [ ] 4.6 INT8 weight-only quantization: speed and quality (val loss) delta
+- [x] 4.6 INT8 weight-only quantization: speed and quality (val loss) delta. Val loss Δ +0.0001 and matmul weights −50%, but decode is 0.78× at B=1: three PyTorch ops per Linear on an overhead-bound model. Rerun on TinyLlama in 4.9d; a fused kernel is 4.10b. See docs/INFERENCE.md
 - [ ] 4.7 Speculative decoding: ~14M model drafts for the ~30M model, measure acceptance rate and speedup
 - [ ] 4.8 Export to HF Llama format, then compare against vLLM and llama.cpp (GGUF)
 
