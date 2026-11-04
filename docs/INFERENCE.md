@@ -274,6 +274,30 @@ Reading:
 - Speed is unoptimised eager decode, about 40 tok/s at B=1. Not a benchmark; 4.11 and 4.9d do that.
 - Logits vs HF Transformers: 4.9c.
 
+### 4.9c Logits match HF Transformers (2026-11-04)
+- Reference: HF `LlamaForCausalLM` (transformers 5.22.1, dev/test dependency only, D-015). fp32 + eager attention is the ground truth.
+- Method: each of 5 prompts (4 chat, 1 plain text) is extended by 64 fp32-greedy tokens, and that fixed sequence is fed to every model. "Decode" rows go one token at a time through each model's KV cache, so they test the cached path, not a full forward. From `scripts/tinyllama_vs_hf.py`, saved as `runs/bench/tinyllama_vs_hf.json` (with provenance).
+
+| Phase | Model vs fp32 | Positions | max abs Δ | mean abs Δ | KL mean (nats) | top-1 |
+|---|---|---|---|---|---|---|
+| prefill | **ours bf16** | 151 | 0.764 | 0.0315 | 3.3e-4 | 100% |
+| prefill | HF bf16 (SDPA) | 151 | 0.764 | 0.0315 | 3.3e-4 | 100% |
+| decode (cached) | **ours bf16** | 264 | 0.560 | 0.0207 | 2.6e-4 | 98.86% |
+| decode (cached) | HF bf16 (SDPA) | 264 | 0.560 | 0.0207 | 2.6e-4 | 98.86% |
+
+- **Ours in bf16 is bit-identical to HF in bf16** (`torch.equal`) at all 415 positions, prefill and decode. We do the same ops in the same order in the same dtype: RMSNorm in fp32 then cast, `rotate_half` RoPE, SDPA with `enable_gqa`, SwiGLU.
+- The 3 top-1 flips against fp32 are the same 3 positions for both. They are near-ties: fp32's top-2 margin there is 0.002 / 0.007 / 0.019 logits, vs a median margin of 1.7. That's why "top-1 ≥ 99%" was the wrong done-when (HF bf16 fails it too). The test now checks "no more flips than HF + 1, each at a margin < 0.1".
+- Free-running greedy text: ours == HF bf16 on all 5 prompts. Both leave the fp32 path at the same token (24, 32 and 43 on three prompts; never on the other two).
+- Tiny random Llamas on CPU in fp32 (GQA 4/2, θ = 500, tied and untied), against HF eager, in both conversion directions (HF → ours, and ours → HF via `save_as_hf`): max diff ~2e-5 on logits of ~12 (rounding). For comparison, a wrong `rope_theta` gives a max diff of ~14. KV-cached decode matches too, and greedy `generate` is token-identical.
+- **Bug found:** transformers 5 writes `rope_parameters: {rope_theta, rope_type}` instead of a top-level `rope_theta`. `config_from_hf` would have silently used θ = 10000. It now reads both and rejects scaled `rope_type`s. TinyLlama's own config is the old layout, so 4.9b was unaffected.
+- **Tokenizer:** we encode with TinyLlama's shipped `tokenizer.json` as-is. transformers 5's `AutoTokenizer` also applies the `"legacy": false` flag from `tokenizer_config.json`, which differs in two places:
+  - It adds no `▁` after a special token. Ours gives `</s>` `▁` `\n` (the normalizer prepends `▁` to every segment).
+  - It absorbs one leading space of the input.
+
+  Its `apply_chat_template` also adds no BOS. The rendered chat string is identical, and so is ordinary text.
+
+  We keep the file's behaviour. The 4.35-era fast tokenizer, used when the model was fine-tuned, most likely read `tokenizer.json` unchanged (`legacy` only affected the slow tokenizer). Not verified against the original training run. The test asserts exactly these differences.
+
 ## Results: Triton kernels (fill in)
 | Kernel | Shape | PyTorch time | Triton time | Achieved GB/s | % of peak | End-to-end tok/s Δ |
 |---|---|---|---|---|---|---|

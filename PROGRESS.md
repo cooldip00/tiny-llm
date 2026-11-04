@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.9c logits match HF (4.1–4.6, 4.12, 4.9a and 4.9b done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
-- **Next action:** compare our TinyLlama logits with HF Transformers `LlamaForCausalLM` on the same weights (prefill + several decode steps, bf16 tolerance). Also check that our `chat_prompt` tokens equal `apply_chat_template`. Transformers would be a dev/test-only dependency (D-015); confirm before adding it.
+- **Step:** 4.11 decode-step overhead (4.1–4.6, 4.12 and 4.9a–c done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
+- **Next action:** profile one KV-cached decode step with `torch.profiler` (our 30M model and TinyLlama, B = 1 / 8 / 32). Then CUDA graphs (or `torch.compile(mode="reduce-overhead")`) on the fixed-shape decode step of `generate()`. Done when outputs are identical to eager and ms/step + tok/s are measured (D-024).
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
@@ -18,6 +18,25 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.9c logits match HF Transformers
+- `transformers` 5.22.1 added to the `dev` group only. `src/tinyllm` never imports it (D-015).
+- `src/tinyllm/logit_compare.py`:
+  - `ours_stepwise` / `hf_stepwise`: prefill, then one token per step through each model's own KV cache.
+  - `logit_stats`: max/mean abs, KL, top-1. `first_divergence`. Reusable for 4.8b.
+- `scripts/tinyllama_vs_hf.py` → `runs/bench/tinyllama_vs_hf.json`. 5 prompts × 64 teacher-forced decode tokens, against HF fp32 eager.
+  - **Ours bf16 is bit-identical to HF bf16** at all 415 positions (prefill + cached decode).
+  - Error vs fp32, the same for both: KL 3.3e-4 (prefill) / 2.6e-4 (decode); max abs 0.76 / 0.56.
+  - Top-1 100% / 98.86%. The 3 flips are near-ties (fp32 margin 0.002–0.019 vs a median of 1.7), at the same positions for HF.
+  - Greedy text: ours == HF bf16 on 5/5 prompts.
+- Done-when adjusted from the plan: "top-1 ≥ 99%" fails for HF's own bf16 too. It's replaced by "no more flips than HF + 1, each at a near-tie (margin < 0.1)", plus KL and max-abs ≤ 1.5× HF's.
+- **Bug fixed:** transformers 5 configs put θ in `rope_parameters`, and `config_from_hf` would have silently used 10000. It now reads both layouts and rejects scaled `rope_type`s. TinyLlama's own config is the old layout, so 4.9b's results stand.
+- Tokenizer: we follow the shipped `tokenizer.json`. transformers 5 `AutoTokenizer` applies `legacy: false` on top. Two documented differences (an extra `▁` after special tokens, one leading space), plus no BOS in its chat template. The chat string itself is identical. Details in INFERENCE.md 4.9c.
+- Tests: `tests/test_hf_reference.py`, 8 tests:
+  - 6 CPU tests (random tiny Llamas in fp32 vs HF eager, both conversion directions, cached decode, greedy generate). These run in CI.
+  - 2 GPU TinyLlama tests: tokenizer differences, and the bf16-vs-fp32 done-when.
+  - `test_hf_llama.py` +2 (`rope_parameters` layout and scaled rope_type).
+- Next: 4.11 decode-step overhead.
 
 ### 2026-11-04 — Step 4.9b load TinyLlama
 - D-026: `TinyLlama-1.1B-Chat-v1.0`, pinned at `fe8a4ea`.

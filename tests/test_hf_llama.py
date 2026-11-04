@@ -75,9 +75,17 @@ def test_tinyllama_config_maps():
     assert c.estimate_params() == 1_100_048_384                      # TinyLlama's published 1.1B
 
 
+def test_rope_theta_from_transformers_v5_layout():
+    v5 = {k: v for k, v in TINYLLAMA_CFG.items() if k not in ("rope_theta", "rope_scaling")}
+    v5["rope_parameters"] = {"rope_type": "default", "rope_theta": 500000.0}
+    assert hl.config_from_hf(v5).rope_theta == 500000.0
+    assert hl.config_from_hf(TINYLLAMA_CFG).rope_theta == 10000.0       # pre-v5 top-level key
+
+
 @pytest.mark.parametrize("field,value", [
     ("rope_scaling", {"type": "linear", "factor": 2.0}), ("hidden_act", "gelu"), ("attention_bias", True),
     ("model_type", "mistral"), ("pretraining_tp", 2), ("head_dim", 128),
+    ("rope_parameters", {"rope_type": "llama3", "rope_theta": 5e5, "factor": 8.0}),
 ])
 def test_unsupported_config_raises(field, value):
     with pytest.raises(ValueError, match="unsupported"):

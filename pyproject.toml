@@ -12,7 +12,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "transformers>=5.22.1",
+]
 
 # Makes `src/tinyllm` an installed (editable) package, so scripts and tests can `import tinyllm`.
 [build-system]

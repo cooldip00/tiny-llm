@@ -35,6 +35,12 @@ def config_from_hf(hf: dict) -> ModelConfig:
         unsupported.append(f"hidden_act={hf['hidden_act']!r}")
     if hf.get("rope_scaling"):
         unsupported.append(f"rope_scaling={hf['rope_scaling']!r}")
+    # transformers >= 5 writes {"rope_parameters": {"rope_theta": ..., "rope_type": ...}} instead of
+    # a top-level rope_theta; scaled variants (linear, llama3, yarn, ...) are a rope_type there.
+    rp = hf.get("rope_parameters") or {}
+    if rp.get("rope_type", "default") != "default":
+        unsupported.append(f"rope_parameters={rp!r}")
+    rope_theta = rp.get("rope_theta", hf.get("rope_theta", 10000.0))
     if hf.get("attention_bias") or hf.get("mlp_bias"):
         unsupported.append("bias in attention / MLP")
     if hf.get("pretraining_tp", 1) != 1:
@@ -53,7 +59,7 @@ def config_from_hf(hf: dict) -> ModelConfig:
         n_kv_heads=hf.get("num_key_value_heads", hf["num_attention_heads"]),
         ffn_hidden=hf["intermediate_size"],
         norm_eps=hf["rms_norm_eps"],
-        rope_theta=hf.get("rope_theta", 10000.0),
+        rope_theta=rope_theta,
         init_std=hf.get("initializer_range", 0.02),
         tie_embeddings=hf.get("tie_word_embeddings", False),
     )
