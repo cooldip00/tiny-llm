@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.9b load TinyLlama (4.1–4.6, 4.12 and 4.9a done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
-- **Next action:** load TinyLlama 1.1B safetensors weights (bf16 per D-023) and its tokenizer into our `Transformer` (`gqa` layers, 32 query / 4 KV heads, untied embeddings); map HF names, check the config fields (rope_theta, norm_eps, vocab 32000, max_seq_len)
+- **Step:** 4.9c logits match HF (4.1–4.6, 4.12, 4.9a and 4.9b done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
+- **Next action:** compare our TinyLlama logits with HF Transformers `LlamaForCausalLM` on the same weights (prefill + several decode steps, bf16 tolerance). Also check that our `chat_prompt` tokens equal `apply_chat_template`. Transformers would be a dev/test-only dependency (D-015); confirm before adding it.
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
@@ -18,6 +18,35 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.9b load TinyLlama
+- D-026: `TinyLlama-1.1B-Chat-v1.0`, pinned at `fe8a4ea`.
+  - Single bf16 file (2,098 MiB), in the HF cache only.
+  - Our own safetensors reader/writer; no new dependency.
+- `src/tinyllm/safetensors_io.py` (~90 lines):
+  - `read_header`; `load_file` memory-maps the file, checks byte counts, and copies each tensor once to its device/dtype.
+  - `save_file` sorts names and pads the header to 8 bytes.
+- `src/tinyllm/hf_llama.py`:
+  - `config_from_hf` raises on features we don't implement.
+  - Name mapping is just the `model.` prefix.
+  - `load_from_dir` builds on meta, then a strict name/shape check, then `assign=True`, then rebuilds RoPE on the real device. Tied and untied heads both work.
+  - `save_as_hf` (for tests and 4.8b), `HFTokenizer` (`tokenizers` + Zephyr chat prompt).
+- `scripts/tinyllama_smoke.py`:
+  - Load 3.8 s; **1,100,048,384 params = `estimate_params`**; all bf16; **2.05 GiB** VRAM.
+  - Greedy chat is coherent ("The capital of France is Paris." + EOS).
+  - About 40 tok/s eager at B=1 (not a benchmark).
+- Tokenizer chat template checked by hand against our `chat_prompt` (same string under HF's `trim_blocks`). 4.9c checks it token by token.
+- Tests: `tests/test_hf_llama.py`, 16 tests:
+  - safetensors round trip over all dtypes; a hand-built file; bad byte count
+  - TinyLlama config → 1.1B exactly; 6 unsupported-config cases
+  - HF-dir round trip (tied and untied) gives identical logits and generate output
+  - missing/extra weights raise; bf16 load rebuilds RoPE
+  - TinyLlama header == our state dict; tokenizer ids (the last two need the cached download)
+- Suite: **202 passed**.
+- `DECISIONS.md` had D-023 twice: an accidental duplicate pasted after D-025.
+  - The two copies differed only in how they cite the training setup ("D-019's 'Other' line" vs "the training 'Other' choices above"). The first is the precise reference.
+  - With the user's OK, I merged them into the first copy and removed the second. This is a one-off exception to the D-021 additions-only rule, and no content was lost.
+- Next: 4.9c logits match HF.
 
 ### 2026-11-04 — Step 4.9a `gqa` attention
 - `src/tinyllm/attention/gqa.py`, registered as `"gqa"`. `k_proj` / `v_proj` map d → n_kv_heads·hd, so every cache stores only the KV heads (the caches and engines already sized by `n_kv_heads`).

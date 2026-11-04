@@ -256,6 +256,24 @@ Reading:
 | vLLM | 1 / 16 | 128 | | | | | |
 | llama.cpp Q8_0 | 1 | 128 | | | | | |
 
+### 4.9b Loading TinyLlama (2026-11-04)
+- Checkpoint: `TinyLlama/TinyLlama-1.1B-Chat-v1.0` @ `fe8a4ea` (D-026), a single bf16 `model.safetensors` (2,098 MiB). It stays in the HF cache, never in the repo.
+- `tinyllm.hf_llama.load_hf_llama()`:
+  - Maps the config (and raises on rope_scaling, biases, a non-SiLU activation, `pretraining_tp`, or a mismatched `head_dim`).
+  - Builds the model on the meta device, so no fp32 copy is ever allocated.
+  - Copies each weight once, from the memory-mapped file to the GPU (our `safetensors_io`).
+  - Runs a strict name and shape check.
+- Weight names need no remapping beyond dropping the `model.` prefix, and q/k need no permutation (same `rotate_half` RoPE as HF).
+- Measured (RTX 4060 Laptop, WSL2), from `scripts/tinyllama_smoke.py`:
+  - Load: 3.8 s from a warm page cache.
+  - 1,100,048,384 parameters, which equals `estimate_params`. All bf16.
+  - VRAM: 2.05 GiB allocated, 2.05 GiB peak.
+- Greedy chat answers are coherent:
+  - "What is the capital of France?" → "The capital of France is Paris." followed by EOS.
+  - Poem and explanation prompts give fluent text up to the 96-token limit.
+- Speed is unoptimised eager decode, about 40 tok/s at B=1. Not a benchmark; 4.11 and 4.9d do that.
+- Logits vs HF Transformers: 4.9c.
+
 ## Results: Triton kernels (fill in)
 | Kernel | Shape | PyTorch time | Triton time | Achieved GB/s | % of peak | End-to-end tok/s Δ |
 |---|---|---|---|---|---|---|

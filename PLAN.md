@@ -91,7 +91,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ### Track B — Real-scale inference (D-015, D-016)
 - [ ] 4.9 TinyLlama 1.1B in our engine
   - [x] 4.9a Implement `gqa` attention (pulled forward from 5.2; TinyLlama uses 4 KV heads) _Done 2026-11-04: `src/tinyllm/attention/gqa.py`, HF head order, SDPA `enable_gqa` (measured 0.07–0.74× the time of repeat_kv + SDPA). Equals `mha` exactly at `n_kv_heads == n_heads`; all three caches and both engines match solo._
-  - [ ] 4.9b Load TinyLlama safetensors weights and its tokenizer into our model code
+  - [x] 4.9b Load TinyLlama safetensors weights and its tokenizer into our model code _Done 2026-11-04: Chat v1.0 @ fe8a4ea (D-026). Our own safetensors I/O; meta-device build, strict check. 1,100,048,384 params, 2.05 GiB VRAM, load 3.8 s; coherent greedy chat._
   - [ ] 4.9c Correctness: our logits match the HF Transformers reference (oracle only, within bf16 tolerance)
   - [ ] 4.9d Rerun the 4.1–4.6 benchmarks on TinyLlama; report decode tok/s as a % of the bandwidth ceiling
   - Speculative decoding (4.7) stays on our models only, because the draft model must share TinyLlama's tokenizer

@@ -223,18 +223,17 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - gRPC or custom protocols: the OpenAI API is what vLLM and every client speak.
   - Running CI on GPU: no free GPU runners. The CPU tests cover correctness; GPU numbers come from the benchmark JSONs.
 
-### D-023 — Inference stores weights in bf16 · ACCEPTED (2026-11-04)
-- **Context:** 4.1–4.6 ran inference with the training layout: fp32 weights under bf16 autocast, so every matmul re-casts its weight on every step. 4.6 measured weights stored in bf16 at **1.28× / 1.20× / 1.31×** decode tok/s (B = 1 / 8 / 32), with val loss 1.2825 → 1.2826 and argmax agreement with plain fp32 unchanged (99.34%). TinyLlama (4.9) is 1.1B params: 4.4 GB in fp32 would not leave room on the 8 GB GPU, but 2.2 GB in bf16 does.
+### D-026 — TinyLlama checkpoint: Chat v1.0, pinned; our own safetensors I/O · ACCEPTED (2026-11-04)
+- **Context:** 4.9b loads TinyLlama 1.1B (D-015) into our model. Two pretrained checkpoints exist: `TinyLlama-1.1B-Chat-v1.0` (one bf16 `model.safetensors`, 2,098 MiB) and the base `intermediate-step-1431k-3T` (fp32, 4,196 MiB). The `safetensors` package isn't installed; `huggingface_hub` (via `datasets`) and `tokenizers` are.
 - **Choice:**
-  - From 4.9 on, inference loads weights in bf16 (`model.to(torch.bfloat16)` after loading), still under bf16 autocast. This covers our checkpoints and TinyLlama.
-  - INT8 (4.6) stays an option on top. It quantizes from the loaded weights, and its non-matmul parts follow the model dtype.
-  - Training is unchanged: fp32 master weights + bf16 autocast (the training "Other" choices above).
-- **Consequence:**
-  - The 4.1–4.6 numbers stay as recorded, labelled "fp32 + autocast". New tables state the weight dtype.
-  - Where a later step compares against an earlier row, it reruns that row in bf16 rather than mixing layouts.
-  - Correctness references stay fp32 (CPU tests, and the plain-fp32 comparisons in 4.6 / 4.9c).
-- **Why:** it is free speed at no quality cost. It halves weight memory, which 4.9 needs. And it is the fair baseline for INT8 and for vLLM / llama.cpp (4.8), which serve bf16/fp16 weights.
+  - Use **`TinyLlama/TinyLlama-1.1B-Chat-v1.0` at revision `fe8a4ea1ffedaf415f4da2f062534de366a451e6`**, pinned in `tinyllm.hf_llama`, so every number refers to the same weights.
+  - Read and write `.safetensors` with our own ~90-line module (`tinyllm.safetensors_io`): JSON header + raw bytes, memory-mapped, each tensor copied once to its device. No new dependency.
+  - Download with `huggingface_hub` into its cache (`~/.cache/huggingface`). Weights never enter the repo (`*.safetensors` is git-ignored anyway).
+  - Tokenizer: `tokenizer.json` via `tokenizers`. HF Transformers stays a test-only reference (D-015), first used in 4.9c.
+- **Why:**
+  - Chat v1.0 is already bf16, which is the D-023 inference layout with no conversion. It answers prompts, so demos and the 4.13 server make sense. Ready-made GGUF conversions exist for 4.8a.
+  - The format is simple enough that a reader is less code than a dependency decision. The writer is also what 4.8b's export needs.
 - **Rejected:**
-  - Keeping fp32 + autocast: slower, and it doesn't fit TinyLlama.
-  - Re-measuring 4.1–4.5 now: costs time before v1-preview, and their within-run ratios still hold.
-  - fp16: bf16 matches training and needs no loss scaling or overflow care.
+  - The base 3T checkpoint: fp32 (twice the download, cast at load), and no chat behaviour for demos. Logit matching (4.9c) works the same on either.
+  - Adding the `safetensors` package: works, but it's one more dependency for ~90 lines of code.
+  - Unpinned `main`: the weights could change under a published number.
