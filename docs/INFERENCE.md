@@ -301,11 +301,13 @@ Reading:
 ## Results: TinyLlama 1.1B (fill in)
 | Step | Batch | Prompt | Decode tok/s | % of ceiling | TTFT (ms) | Peak VRAM | Notes |
 |---|---|---|---|---|---|---|---|
-| HF Transformers `generate` | 1 | 128 | | | | | baseline |
-| ours naive | 1 | 128 | | | | | |
-| ours KV cache | 1 | 128 | | | | | |
-| ours continuous batching | 16 | mixed | | n/a | | | |
-| ours INT8 | 1 | 128 | | | | | quality Δ: |
+| HF Transformers `generate` | 1 | 128 | 45 | 23.3% | 24.6 | 2,118 MiB | baseline (bf16, SDPA). 22.3 ms/step at every batch and prompt: host-bound |
+| ours naive | 1 | 128 | 33 | 17.4% | 24.6 | 2,160 MiB | full forward per token |
+| ours KV cache | 1 | 128 | 45 | 23.4% | 22.8 | 2,162 MiB | eager, host-bound like HF |
+| ours KV cache + CUDA graphs (4.11) | 1 | 128 | **128** | **66.8%** | 24.9 | 2,685 MiB | 2.8× HF |
+| ours KV cache + CUDA graphs (4.11) | 32 | 128 | 2,083 | 33.9% | 333 | 3,886 MiB | 1.44× HF (1,445). % counts weight reads only |
+| ours continuous batching | 16 | mixed | 475 | n/a | 5,290 (mean) | 3,151 MiB | 1.32× static (360 tok/s); 64 requests |
+| ours INT8 | 1 | 128 | 37 | 10.1% of 362 | 30.0 | 3,455 MiB | quality Δ: val loss +0.0010 (1.6283 → 1.6293), argmax 98.49% vs bf16. 0.80× bf16 speed. VRAM includes the bf16 copy |
 | vLLM | 1 / 16 | 128 | | | | | |
 | llama.cpp Q8_0 | 1 | 128 | | | | | |
 
@@ -321,6 +323,7 @@ Reading:
   - Load: 3.8 s from a warm page cache.
   - 1,100,048,384 parameters, which equals `estimate_params`. All bf16.
   - VRAM: 2.05 GiB allocated, 2.05 GiB peak.
+  - _Correction (4.9d): the GPU is the RTX 3070 Ti Laptop (8 GB), as in Phase 0, not an RTX 4060. The numbers are unaffected._
 - Greedy chat answers are coherent:
   - "What is the capital of France?" → "The capital of France is Paris." followed by EOS.
   - Poem and explanation prompts give fluent text up to the 96-token limit.
@@ -350,6 +353,74 @@ Reading:
   Its `apply_chat_template` also adds no BOS. The rendered chat string is identical, and so is ordinary text.
 
   We keep the file's behaviour. The 4.35-era fast tokenizer, used when the model was fine-tuned, most likely read `tokenizer.json` unchanged (`legacy` only affected the slow tokenizer). Not verified against the original training run. The test asserts exactly these differences.
+
+### 4.9d TinyLlama benchmarks against the bandwidth ceiling (2026-11-04)
+- Setup:
+  - TinyLlama 1.1B, bf16 weights, bf16 autocast, RTX 3070 Ti Laptop (8 GB), WSL2.
+  - Protocol as in 4.1: 256 new tokens, 3 warmups, median of 5.
+  - Prompts are our validation stories re-tokenized with TinyLlama's tokenizer, joined by `</s>` (`data/validation_tinyllama.bin`, git-ignored, built on first use).
+  - Scripts: `bench_generate.py` / `bench_serving.py` / `bench_quant.py --model tinyllama` → `runs/bench/tinyllama/*.json` (with provenance). `--engine hf` times HF `generate` as the baseline (D-015).
+- **Ceiling:** 423 GB/s ÷ 2,098 MiB of stored weights = **192 tok/s per sequence**. The % column is B × that.
+  - It counts weight reads only, not KV reads, so it understates efficiency at large batch and long context.
+  - A step reads only one row of the 125 MiB input embedding table. Excluding the table gives **~204 tok/s**, so the B=1 graph row is ~63% of that stricter ceiling.
+  - INT8 rows use their own ceiling: 1,113 MiB stored, so 362 tok/s.
+
+Decode tok/s (% of ceiling):
+
+| Engine | B | P=32 | P=128 | P=512 | ms/step at P=128 |
+|---|---|---|---|---|---|
+| HF `generate` | 1 | 45 (23.2%) | 45 (23.3%) | 44 (23.1%) | 22.3 |
+| ours naive | 1 | 44 (23.0%) | 33 (17.4%) | 16 (8.1%) | 29.9 |
+| ours KV, eager | 1 | 45 (23.2%) | 45 (23.4%) | 49 (25.3%) | 22.3 |
+| **ours KV + graphs** | 1 | **134 (69.5%)** | **128 (66.8%)** | **115 (59.8%)** | 7.8 |
+| HF `generate` | 8 | 361 | 358 | 358 | 22.3 |
+| ours KV, eager | 8 | 395 | 391 | 393 | 20.5 |
+| **ours KV + graphs** | 8 | **907 (59.0%)** | **851 (55.4%)** | **662 (43.0%)** | 9.4 |
+| HF `generate` | 32 | 1,448 | 1,445 | 1,439 | 22.1 |
+| ours KV, eager | 32 | 1,350–1,577 | 1,089–1,586 | 721–1,335 | 20.2–29.4 |
+| **ours KV + graphs** | 32 | **2,485 (40.4%)** | **2,083 (33.9%)** | **1,254 (20.4%)** | 15.4 |
+
+- TTFT at B=1, P=128: HF 24.6 ms, ours 22.8–24.9 ms. Prefill is the same eager code on every engine of ours. At B=32, P=512: 1.2–1.3 s for all of ours and HF.
+- Reading:
+  - **Eager decode is host-bound at ~20–22 ms/step**, for us and for HF alike, whatever the batch or prompt. That gives ~23% of the ceiling at B=1. At B=8 our eager loop is 9% faster than HF's.
+  - **CUDA graphs reach 60–70% of the ceiling at B=1** (2.8× HF). The rest of the gap is kernel efficiency, not overhead (4.11 profile: GPU idle 3%).
+  - **At larger batch and context the graph step slows**, from 7.5 ms (B=1, P=32) to 25.5 ms (B=32, P=512). The extra bytes alone don't explain it: B=32 reads at most ~0.7 GB of KV per step on top of 2.2 GB of weights. The likely rest is attention over the fixed masked window, which uses the mem-efficient kernel (4.11). Not profiled; that's 4.10 territory.
+  - Naive drops 44 → 16 tok/s from P=32 to P=512, because it re-runs the whole context every step. With 2,048 positions of context, TinyLlama never slides at these lengths.
+- **Eager B=32 rows vary from run to run** (P=128: 1,586, 1,298, 1,130 and 1,089 tok/s on four runs; P=512: 721, 945, 952 and 1,335). The table gives the range, from the first sweep and the B=32 rerun (`kv_b32.json`).
+  - At B=32 the eager `KVCache` grows the caching allocator's reserved memory to 4.6–5.7 GiB, against 3.8–4.6 GiB allocated, on a card where Windows already holds some VRAM.
+  - **WSL finding:** when reserved memory passes physical VRAM, the WSL driver spills to host memory instead of raising OOM. The first sweep's B=32 P=512 eager row took 10.6 s to its first token and decoded at 721 tok/s for that reason.
+  - `bench()` now calls `torch.cuda.empty_cache()` before each row's warmup. After that the same row gives 1.2 s TTFT and 952 tok/s.
+  - With nothing left to spill, a real OOM can surface instead. The first kv-graph B=32 rerun crashed with one. Each `GraphDecoder` holds a 2,048-position static cache (1.4 GiB at B=32), and the decoders from the B=2 and B=8 correctness checks were still alive, ~0.45 GiB, the most likely cause. The benchmark now keeps one live decoder at a time. The rerun then completed (the allocator logged one OOM and recovered) and matched the first sweep within 2% (2,485 / 2,083 / 1,254 vs 2,433 / 2,071 / 1,259).
+- **Continuous batching** (`bench_serving`, the same 64-request workload shape as 4.4, 9,004 tokens; median of 3):
+
+  | Slots | static tok/s | continuous tok/s | × | latency mean / p95 (s), cont. | row util static → cont. | KV reserved (cont.) | KV holding tokens |
+  |---|---|---|---|---|---|---|---|
+  | 8 | 198 | 272 | 1.37× | 15.4 / 28.5 | 59% → 86% | 352 MiB | 10% |
+  | 16 | 360 | 475 | 1.32× | 9.0 / 16.5 | 55% → 78% | 704 MiB | 9% |
+  | 32 | 669 | 738 | 1.10× | 6.1 / 10.5 | 55% → 64% | 1,408 MiB | 8% |
+
+  - Same pattern as on the 30M model (4.4): the gain is largest at few slots and shrinks at 32, where 64 requests are only 2 waves.
+  - These run eager (no graphs), so they are host-bound like the eager rows above.
+  - Each slot reserves `max_seq_len` = 2,048 positions, so only 8–10% of the reserved KV holds tokens. That is the paged cache's case (4.5), now 4× larger than on the 30M model.
+  - Identical to solo `generate()`: 21–32 of 64 requests per row. These are bf16 near-ties, as in 4.4.
+- **INT8** (`bench_quant`, P=128; median of 3 rounds):
+  - Matmul weights 1,973 → 988 MiB (−50%). Embedding (125 MiB) stays bf16.
+  - Quality: val loss 1.6283 → 1.6293 (**Δ +0.0010**), on 80 × 8 × 512 re-tokenized validation tokens. Teacher-forced against bf16 on 8 × 256 tokens: argmax agreement 98.49%, KL 9.7e-4 nats. The largest bf16 margin at a flip is 0.31 (median margin 2.0). Greedy rows identical to bf16: 0/8.
+  - Speed, decode tok/s:
+
+    | B | bf16 | int8 | int8 ÷ bf16 |
+    |---|---|---|---|
+    | 1 | 46 | 37 | 0.80× |
+    | 8 | 369 | 275 | 0.74× |
+    | 32 | 1,323 | 717 | 0.54× |
+
+  - **INT8 is slower, and more so at larger batch.** `Int8Linear` casts the whole weight to bf16 every call, so each step reads 1 byte, writes 2 and reads 2 again per weight, instead of reading 2. Overhead hides this at B=1; it shows once the step gets closer to bandwidth-bound. Peak VRAM 6.9 GiB at B=32 (both variants resident, plus the cast temporaries). The fix is a fused dequant GEMV (4.10b).
+- Correctness checks (not asserted; bf16 near-ties, per the reference-answer rule):
+  - Every engine's timed loop equals its `generate()` / `sample()` greedy output (asserted).
+  - KV vs naive: 1/8 rows identical. Teacher-forced max |logit diff| 1.53 on a logit scale of 33, argmax agreement 99.17%. That fits 4.9c, where each bf16 path is up to 0.76 off fp32.
+  - Graphs vs eager KV: teacher-forced max diff 0.58, argmax 98.97%, 21 flips, all at an eager margin ≤ 0.125 (median 2.0).
+  - HF `generate` vs our KV: 2/8 greedy rows identical. Teacher-forced argmax agreement 99.41%, 6 flips, all at our margin ≤ 0.125 (1 bf16 ulp at that scale; median 1.6). 4.9c was bit-identical because both models ran plain bf16 there; here ours runs under autocast.
+- Not done: the vLLM / llama.cpp rows (4.8a), CUDA graphs for the serving engines (PARKING_LOT), and the fused INT8 kernel (4.10b).
 
 ## Results: Triton kernels (fill in)
 | Kernel | Shape | PyTorch time | Triton time | Achieved GB/s | % of peak | End-to-end tok/s Δ |

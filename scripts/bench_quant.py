@@ -14,6 +14,11 @@ Speed: bench_generate.bench with the KV engine (P=128, 256 new tokens, 3 warmups
 interleaved over variants, the whole sweep repeated --rounds times; the median round is reported.
 
     uv run python scripts/bench_quant.py [--rounds 3] [--eval-batches 20]
+
+Step 4.9d: --model tinyllama. Variants bf16 (the published weights, so the baseline) and int8; an
+fp32 copy (4.4 GB) beside them does not fit in 8 GB. The "exact" reference is the bf16 model
+without autocast. Val loss is on the validation text re-tokenized with TinyLlama's tokenizer, 8
+sequences x 512 tokens per batch (4x the batches, same token count), teacher-forced on 8 sequences.
 """
 
 import argparse
@@ -27,9 +32,8 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
-from bench_generate import bench, kv_greedy, load_model, make_prompts  # noqa: E402
+from bench_generate import bench, kv_greedy, make_prompts, use_model, val_tokens  # noqa: E402
 
-from tinyllm.data import load_tokens
 from tinyllm.generate import generate
 from tinyllm.provenance import Provenance
 from tinyllm.quant import quantize_model, weight_bytes
@@ -66,15 +70,26 @@ def main() -> None:
     p.add_argument("--new-tokens", type=int, default=256)
     p.add_argument("--rounds", type=int, default=3)
     p.add_argument("--eval-batches", type=int, default=20)
-    p.add_argument("--out", default="runs/bench/int8.json")
+    p.add_argument("--model", default=None, help="'tinyllama' instead of --ckpt (4.9d)")
+    p.add_argument("--out", default=None, help="default: runs/bench/int8.json, runs/bench/tinyllama/int8.json")
     args = p.parse_args()
+    tiny = args.model == "tinyllama"
+    if args.model not in (None, "tinyllama"):
+        p.error("--model takes 'tinyllama'; use --ckpt for a checkpoint")
+    args.out = args.out or ("runs/bench/tinyllama/int8.json" if tiny else "runs/bench/int8.json")
     dev = "cuda"
 
-    fp32 = load_model(Path(args.ckpt), dev)
-    bf16 = copy.deepcopy(fp32).to(torch.bfloat16)
-    int8 = copy.deepcopy(fp32)
-    n_q = quantize_model(int8)
-    variants = {"fp32": fp32, "bf16": bf16, "int8": int8}
+    if tiny:
+        bf16 = use_model("tinyllama", dev)
+        int8 = copy.deepcopy(bf16)
+        n_q = quantize_model(int8)
+        variants, base = {"bf16": bf16, "int8": int8}, "bf16"
+    else:
+        fp32 = use_model(args.ckpt, dev)
+        bf16 = copy.deepcopy(fp32).to(torch.bfloat16)
+        int8 = copy.deepcopy(fp32)
+        n_q = quantize_model(int8)
+        variants, base = {"fp32": fp32, "bf16": bf16, "int8": int8}, "fp32"
     print(f"{torch.cuda.get_device_name()} | torch {torch.__version__} | {n_q} Linear layers -> Int8Linear")
 
     sizes = {k: {kind: b / MiB for kind, b in weight_bytes(m).items()} for k, m in variants.items()}
@@ -87,36 +102,39 @@ def main() -> None:
     assert torch.equal(kv_greedy(int8, check, 64)[0], generate(int8, check, 64, temperature=0))
     print("check: int8 timed kv loop == generate(temperature=0): OK")
 
-    val = load_tokens("validation")
-    cfg = TrainConfig(eval_batches=args.eval_batches)
+    val = val_tokens()
+    cfg = (TrainConfig(eval_batches=4 * args.eval_batches, micro_batch=8) if tiny    # same tokens, fits 8 GB
+           else TrainConfig(eval_batches=args.eval_batches))
     losses = {k: evaluate(m, val, cfg) for k, m in variants.items()}
-    print("val loss (" + f"{args.eval_batches} x {cfg.micro_batch} x {cfg.seq_len} tokens): "
-          + " | ".join(f"{k} {v:.4f}" for k, v in losses.items())
-          + f" | int8 - fp32 = {losses['int8'] - losses['fp32']:+.4f}, bf16 - fp32 = {losses['bf16'] - losses['fp32']:+.4f}")
+    print(f"val loss ({cfg.eval_batches} x {cfg.micro_batch} x {cfg.seq_len} tokens): "
+          + " | ".join(f"{k} {v:.4f}" for k, v in losses.items()) + " | "
+          + ", ".join(f"{k} - {base} = {losses[k] - losses[base]:+.4f}" for k in variants if k != base))
 
-    prompts = make_prompts(32, args.prompt_len, dev)
+    n_seq = 8 if tiny else 32
+    prompts = make_prompts(n_seq, args.prompt_len, dev)
     greedy = {k: kv_greedy(m, prompts, args.new_tokens)[0] for k, m in variants.items()}
-    same = {k: int((g == greedy["fp32"]).all(1).sum()) for k, g in greedy.items()}
-    tf = teacher_forced(variants, fp32, greedy["fp32"], args.prompt_len)
-    print(f"vs plain fp32 (teacher-forced, 32 x {args.new_tokens} tokens, median top-1 margin "
+    same = {k: int((g == greedy[base]).all(1).sum()) for k, g in greedy.items()}
+    tf = teacher_forced(variants, variants[base], greedy[base], args.prompt_len)
+    print(f"vs plain {base} (teacher-forced, {n_seq} x {args.new_tokens} tokens, median top-1 margin "
           f"{tf['_median_gap']:.2f} nats):")
     for k in variants:
         t = tf[k]
         gap = "-" if t["max_gap_at_flip"] is None else f"{t['max_gap_at_flip']:.3f}"
         print(f"  {k:>4}: argmax agree {t['argmax_agree']:.2%} | KL {t['kl_mean']:.2e} nats | "
-              f"largest margin at a flip {gap} | greedy rows identical to fp32-autocast {same[k]}/32")
+              f"largest margin at a flip {gap} | greedy rows identical to {base}-autocast {same[k]}/{n_seq}")
 
     batches = list(map(int, args.batch_sizes.split(",")))
     runs = {k: {b: [] for b in batches} for k in variants}
-    prov = Provenance(weights="fp32 + bf16 autocast / bf16 / int8 (per row)", script="bench_quant",
-                      rounds=args.rounds).start()
+    prov = Provenance(weights=("bf16 / int8 (per row), bf16 autocast" if tiny else
+                               "fp32 + bf16 autocast / bf16 / int8 (per row)"), script="bench_quant",
+                      rounds=args.rounds, model="tinyllama" if tiny else args.ckpt).start()
     for r in range(args.rounds):
         for b in batches:
             for k, m in variants.items():
                 runs[k][b].append(bench(m, "kv", b, args.prompt_len, args.new_tokens, 3, 5, dev))
         print(f"round {r + 1}/{args.rounds}: " + " | ".join(
             f"B={b} " + "/".join(f"{runs[k][b][-1]['decode_tok_s']:.0f}" for k in variants) for b in batches)
-            + "  (fp32/bf16/int8 decode tok/s)", flush=True)
+            + f"  ({'/'.join(variants)} decode tok/s)", flush=True)
 
     provenance = prov.finish()
     rows = []
@@ -125,14 +143,15 @@ def main() -> None:
             rs = sorted(runs[k][b], key=lambda x: x["decode_tok_s"])
             med = rs[len(rs) // 2]
             rows.append({"variant": k, **med, "decode_tok_s_rounds": [x["decode_tok_s"] for x in runs[k][b]]})
-            base = next(x for x in rows if x["variant"] == "fp32" and x["batch"] == b)
+            ref = next(x for x in rows if x["variant"] == base and x["batch"] == b)
             print(f"B={b:>2} {k:>4} | decode {med['decode_tok_s']:7.0f} tok/s ({med['ms_per_step']:.2f} ms/step, "
-                  f"{med['decode_tok_s'] / base['decode_tok_s']:.2f}x fp32) | TTFT {med['ttft_ms']:.2f} ms | "
+                  f"{med['decode_tok_s'] / ref['decode_tok_s']:.2f}x {base}, "
+                  f"{med['pct_of_ceiling']:.1f}% of its ceiling) | TTFT {med['ttft_ms']:.2f} ms | "
                   f"rounds {[round(x) for x in rows[-1]['decode_tok_s_rounds']]}")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"ckpt": args.ckpt, "gpu": torch.cuda.get_device_name(), "torch": torch.__version__,
+    out.write_text(json.dumps({"model": "tinyllama" if tiny else args.ckpt, "baseline": base, "gpu": torch.cuda.get_device_name(), "torch": torch.__version__,
                                "provenance": provenance, "weights_mib": sizes, "val_loss": losses, "eval_batches": args.eval_batches,
                                "teacher_forced": tf, "greedy_rows_identical": same, "rows": rows}, indent=2))
     print(f"wrote {out}")

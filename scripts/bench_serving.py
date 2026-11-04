@@ -13,6 +13,9 @@ request. bf16 near-ties may flip a token, after which the rows diverge (as in 4.
 report gives identical requests and the first divergence instead of asserting equality.
 
     uv run python scripts/bench_serving.py [--ckpt checkpoints/main/best.pt] [--requests 64]
+
+Step 4.9d: --model tinyllama runs the same workload shape on TinyLlama (bf16), with the prompts
+cut from the validation text re-tokenized by its tokenizer (bench_generate.tinyllama_val_tokens).
 """
 
 import argparse
@@ -24,9 +27,8 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from bench_generate import load_model  # noqa: E402
+from bench_generate import use_model, val_tokens  # noqa: E402
 
-from tinyllm.data import load_tokens
 from tinyllm.engine import Request, run_continuous, run_static
 from tinyllm.generate import generate
 from tinyllm.provenance import GpuMonitor, Provenance
@@ -34,7 +36,7 @@ from tinyllm.provenance import GpuMonitor, Provenance
 
 def make_workload(n: int, seed: int) -> list[Request]:
     rng = np.random.default_rng(seed)
-    val = load_tokens("validation")
+    val = val_tokens()
     reqs = []
     for _ in range(n):
         t = int(rng.integers(32, 257))
@@ -69,10 +71,16 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=3, help="runs per config; the median-wall run is reported")
     ap.add_argument("--paged", action="store_true",
                     help="4.5: add paged-KV rows with the 8-slot cache's memory budget")
-    ap.add_argument("--out", type=Path, default=Path("runs/bench/serving.json"))
+    ap.add_argument("--model", default=None, help="'tinyllama' instead of --ckpt (4.9d)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="default: runs/bench/serving.json, runs/bench/tinyllama/serving.json")
     args = ap.parse_args()
+    tiny = args.model == "tinyllama"
+    if args.model not in (None, "tinyllama"):
+        ap.error("--model takes 'tinyllama'; use --ckpt for a checkpoint")
+    args.out = args.out or Path("runs/bench/tinyllama/serving.json" if tiny else "runs/bench/serving.json")
     device = "cuda"
-    model = load_model(args.ckpt, device)
+    model = use_model("tinyllama" if tiny else str(args.ckpt), device)
     reqs = make_workload(args.requests, args.seed)
     print(f"{len(reqs)} requests: prompt {min(len(r.prompt) for r in reqs)}-"
           f"{max(len(r.prompt) for r in reqs)}, new {min(r.max_new_tokens for r in reqs)}-"
@@ -97,7 +105,8 @@ def main() -> None:
                  for s, bs in ((8, 16), (32, 16), (32, 8), (32, 32), (64, 16))]
 
     rows = []
-    prov = Provenance(weights="fp32 + bf16 autocast", script="bench_serving", repeats=args.repeats).start()
+    prov = Provenance(weights=f"{'bf16' if tiny else 'fp32'} + bf16 autocast", script="bench_serving",
+                      repeats=args.repeats, model="tinyllama" if tiny else str(args.ckpt)).start()
     for name, size, fn, kw in runs:
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()

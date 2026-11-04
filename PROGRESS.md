@@ -2,8 +2,9 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.9d TinyLlama benchmarks against the bandwidth ceiling (4.1–4.6, 4.12, 4.9a–c and 4.11 done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
-- **Next action:** rerun the 4.1–4.6 benchmarks on TinyLlama (naive, kv, kv-graph, continuous, INT8) with bf16 weights. Report decode tok/s as a % of the 192 tok/s ceiling and fill the TinyLlama results table in INFERENCE.md. `bench_generate.py` needs TinyLlama prompts (its tokenizer, not ours) and a `--model tinyllama` path.
+- **Step:** 6.7 CI (4.1–4.6, 4.12, 4.9a–d and 4.11 done; order per D-024/D-025: 4.9d → 6.7 CI → first README → public = v1-preview around 2026-11-11)
+- **Next action:** GitHub Actions workflow running the CPU test suite (GPU tests skip without CUDA) on every push, plus a status badge for the README (D-025).
+- _Previous step 4.9d (TinyLlama benchmarks against the bandwidth ceiling): done 2026-11-04, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
@@ -18,6 +19,29 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.9d TinyLlama benchmarks against the bandwidth ceiling
+- `bench_generate.py`, `bench_serving.py`, `bench_quant.py` take `--model tinyllama`, which writes to `runs/bench/tinyllama/*.json`.
+  - Prompts: validation stories re-tokenized with TinyLlama's tokenizer (`data/validation_tinyllama.bin`, git-ignored, built on first use).
+  - Each row reports the ceiling, the % of it, and peak reserved memory.
+  - `--engine hf` times HF `generate` (bf16, SDPA) as the baseline, with a greedy and teacher-forced comparison.
+  - `bench_quant` on TinyLlama compares bf16 (the baseline) with int8. An fp32 copy doesn't fit in 8 GB.
+- Ceiling 192 tok/s per sequence (423 GB/s ÷ 2,098 MiB). Excluding the 125 MiB input embedding gives ~204.
+- Decode at B=1, P=128: HF 45 (23.3%), naive 33, eager KV 45 (23.4%), **KV + CUDA graphs 128 tok/s (66.8%)**. At P=32 graphs reach 134 (69.5%).
+  - Eager, ours and HF, is host-bound at ~20–22 ms/step whatever B or P.
+  - Graphs: B=8 851 (55%), B=32 2,083 (34%; the % counts weight reads only). They slow at long context: B=32 P=512 is 1,254 tok/s.
+- Continuous vs static: 1.37× / 1.32× / 1.10× at 8 / 16 / 32 slots. Slots reserve 2,048 positions each, so only 8–10% of the reserved KV holds tokens.
+- INT8: val loss Δ +0.0010, argmax 98.49% vs bf16. Speed 0.80× / 0.74× / 0.54× bf16 at B=1 / 8 / 32: the cast materialises a bf16 weight every call. A fused kernel is 4.10b.
+- Near-ties only:
+  - HF vs ours: 6 teacher-forced flips, all at margin ≤ 0.125.
+  - Graphs vs eager: 21 flips, ≤ 0.125.
+  - KV vs naive: max diff 1.53, consistent with 4.9c.
+- **WSL finding:**
+  - When the caching allocator's reserved memory passes physical VRAM, WSL spills to host memory instead of raising OOM. Eager B=32 P=512 then took 10.6 s to its first token (it should take 1.2 s).
+  - `bench()` now calls `empty_cache()` before each row. The kv-graph bench keeps one live `GraphDecoder`; stale ones caused a real OOM.
+  - Eager B=32 still varies ±20% run to run (memory-marginal on 8 GB).
+- Docs: TinyLlama results table filled (vLLM / llama.cpp rows wait for 4.8a), plus the INFERENCE.md 4.9d section. A correction note in 4.9b: the GPU is the 3070 Ti Laptop, not a 4060.
+- Next: 6.7 CI.
 
 ### 2026-11-04 — Step 4.11 CUDA graphs on the decode step
 - `src/tinyllm/cuda_graph.py`:
