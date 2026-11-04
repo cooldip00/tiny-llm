@@ -33,6 +33,7 @@ from tinyllm.data import load_tokens
 from tinyllm.generate import generate, sample
 from tinyllm.kv_cache import KVCache
 from tinyllm.model import Transformer
+from tinyllm.provenance import Provenance
 from tinyllm.train import load_checkpoint
 
 
@@ -180,6 +181,7 @@ def main() -> None:
         print("check:", kv_vs_naive(model, device))
 
     rows = []
+    prov = Provenance(weights="fp32 + bf16 autocast", script="bench_generate", engine=args.engine).start()
     for b in map(int, args.batch_sizes.split(",")):
         for plen in map(int, args.prompt_lens.split(",")):
             r = bench(model, args.engine, b, plen, args.new_tokens, args.warmup, args.repeats, device)
@@ -195,7 +197,7 @@ def main() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"engine": args.engine, "ckpt": args.ckpt, "gpu": torch.cuda.get_device_name(),
-                               "torch": torch.__version__, "rows": rows}, indent=2))
+                               "torch": torch.__version__, "provenance": prov.finish(), "rows": rows}, indent=2))
     print(f"wrote {out}")
 
 

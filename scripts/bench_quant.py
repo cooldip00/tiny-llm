@@ -31,6 +31,7 @@ from bench_generate import bench, kv_greedy, load_model, make_prompts  # noqa: E
 
 from tinyllm.data import load_tokens
 from tinyllm.generate import generate
+from tinyllm.provenance import Provenance
 from tinyllm.quant import quantize_model, weight_bytes
 from tinyllm.train import TrainConfig, evaluate
 
@@ -107,6 +108,8 @@ def main() -> None:
 
     batches = list(map(int, args.batch_sizes.split(",")))
     runs = {k: {b: [] for b in batches} for k in variants}
+    prov = Provenance(weights="fp32 + bf16 autocast / bf16 / int8 (per row)", script="bench_quant",
+                      rounds=args.rounds).start()
     for r in range(args.rounds):
         for b in batches:
             for k, m in variants.items():
@@ -115,6 +118,7 @@ def main() -> None:
             f"B={b} " + "/".join(f"{runs[k][b][-1]['decode_tok_s']:.0f}" for k in variants) for b in batches)
             + "  (fp32/bf16/int8 decode tok/s)", flush=True)
 
+    provenance = prov.finish()
     rows = []
     for b in batches:
         for k in variants:
@@ -129,7 +133,7 @@ def main() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"ckpt": args.ckpt, "gpu": torch.cuda.get_device_name(), "torch": torch.__version__,
-                               "weights_mib": sizes, "val_loss": losses, "eval_batches": args.eval_batches,
+                               "provenance": provenance, "weights_mib": sizes, "val_loss": losses, "eval_batches": args.eval_batches,
                                "teacher_forced": tf, "greedy_rows_identical": same, "rows": rows}, indent=2))
     print(f"wrote {out}")
 

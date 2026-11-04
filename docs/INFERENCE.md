@@ -60,6 +60,13 @@ Every optimized path must match the slow path before it replaces it:
 - Warmup: 3 runs, then `torch.cuda.synchronize()` around timed regions; median of 5.
 - Report: prefill tok/s, decode tok/s, time to first token, peak VRAM (`torch.cuda.max_memory_allocated`).
 - Same model checkpoint for every row.
+- Provenance (4.12, D-025): every `runs/bench/*.json` written from 4.12 on has a `"provenance"` key (`src/tinyllm/provenance.py`):
+  - static: git commit + dirty flag, python / torch / CUDA / cuDNN, GPU + driver, weight dtype, script
+  - `before` / `after`: one GPU sample, WSL load average, Windows CPU % (via `powershell.exe`, ~2 s, so never inside the timed region)
+  - `during`: one `nvidia-smi -lms 500` process beside the run: min / median / max SM clock, memory clock, temperature, power, utilisation; `clocks.sm_busy` (samples at ≥ 10% utilisation only); every NVML throttle reason seen
+  - `bench_serving.py` also stores `gpu_during` per row, so an outlier row (as in 4.5) can be matched to clocks or throttling
+  - WSL's `/proc/loadavg` sees only the Linux VM; load from Windows programs shows up only in the Windows CPU %
+  - First reading (2026-11-04 smoke runs): during B=1 KV decode the GPU sits at **~860 MHz SM, ~27 W**, with only `gpu_idle` set (boost is ~1,875 MHz; a heavy matmul holds ~1,350 MHz at the 135 W power cap). The decode step is so launch-bound that the GPU downclocks between kernels. More evidence for 4.11.
 
 ## KV cache size, main config
 `2 × 8 layers × 8 kv_heads × 64 head_dim × 512 seq × 2 B` = **8 MiB per sequence** (bf16).

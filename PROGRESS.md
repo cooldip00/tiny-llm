@@ -2,7 +2,7 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.12 benchmark provenance, then 4.9a `gqa` attention (4.1–4.6 done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
+- **Step:** 4.9a `gqa` attention (4.1–4.6 and 4.12 done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
 - **Next action:** `gqa` attention with `n_kv_heads < n_heads` (K/V heads shared across query groups), registered as a layer type next to `mha`; it must equal `mha` when `n_kv_heads == n_heads`, and work with `KVCache` / `SlotKVCache` / `PagedKVCache` (cache shapes use `n_kv_heads`)
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -18,6 +18,15 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.12 benchmark provenance
+- `src/tinyllm/provenance.py`: `Provenance(**extra).start()` / `.finish()` returns a dict of static info (git commit + dirty, python / torch / CUDA / cuDNN, GPU + driver, the weight dtype), plus `before` / `during` / `after` samples.
+  - `during` comes from one `nvidia-smi -lms 500` process beside the run (min / median / max SM + memory clock, temperature, power, utilisation; busy-only SM clock; NVML throttle reasons seen; WSL load).
+  - Windows CPU % (via `powershell.exe`, ~2 s) is read only before and after. Missing tools give None, never an error.
+- Wired into `bench_generate.py`, `bench_serving.py` (also `gpu_during` per row) and `bench_quant.py`, as a `"provenance"` key in each JSON. All three smoke-tested.
+- **Finding:** during B=1 KV decode the GPU runs at **~860 MHz SM / ~27 W** with only `gpu_idle` set, versus ~1,875 MHz boost and ~1,350 MHz under a heavy matmul at the 135 W cap. The step is so launch-bound that the GPU downclocks between kernels. More evidence for 4.11.
+- Suite: **172 passed**. `tests/test_provenance.py`: 6 tests (parsing, N/A handling, throttle decoding, summaries incl. busy-only clock, git info, no-tools fallback).
+- Next: 4.9a `gqa`.
 
 ### 2026-11-04 — Step 4.6 INT8 weight-only quantization
 - `src/tinyllm/quant.py`: per-output-channel symmetric absmax INT8 (`quantize_per_channel`, `Int8Linear`, `quantize_model`, `weight_bytes`).

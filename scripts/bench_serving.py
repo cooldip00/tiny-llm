@@ -29,6 +29,7 @@ from bench_generate import load_model  # noqa: E402
 from tinyllm.data import load_tokens
 from tinyllm.engine import Request, run_continuous, run_static
 from tinyllm.generate import generate
+from tinyllm.provenance import GpuMonitor, Provenance
 
 
 def make_workload(n: int, seed: int) -> list[Request]:
@@ -96,15 +97,18 @@ def main() -> None:
                  for s, bs in ((8, 16), (32, 16), (32, 8), (32, 32), (64, 16))]
 
     rows = []
+    prov = Provenance(weights="fp32 + bf16 autocast", script="bench_serving", repeats=args.repeats).start()
     for name, size, fn, kw in runs:
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
+        mon = GpuMonitor().start()  # per row, so an outlier row can be matched to clocks / throttling
         trials = [fn(model, reqs, size, **kw) for _ in range(args.repeats)]
+        gpu_during = mon.stop()
         walls = [s["wall_s"] for _, s in trials]
         results, stats = sorted(trials, key=lambda t: t[1]["wall_s"])[len(trials) // 2]  # median run
         stats.update(engine=name, size=size, wall_all_s=walls,
                      peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20,
-                     correctness=agreement([r.tokens for r in results], ref))
+                     correctness=agreement([r.tokens for r in results], ref), gpu_during=gpu_during)
         rows.append(stats)
         c = stats["correctness"]
         alloc = stats["kv_alloc_used_mean"]
@@ -119,7 +123,7 @@ def main() -> None:
               f"same as solo {c['identical']}/{c['of']}", flush=True)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"workload": {"requests": len(reqs), "seed": args.seed},
-                                    "rows": rows}, indent=2))
+                                    "provenance": prov.finish(), "rows": rows}, indent=2))
     print(f"wrote {args.out}")
 
 
