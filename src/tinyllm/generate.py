@@ -3,6 +3,7 @@
 - sample(): naive, a full forward pass over the context per new token (no cache).
   Used for training samples, and the reference that every faster path must match (4.1).
 - generate(): KV-cached, one prefill pass then one new token per forward (4.3).
+  cuda_graph=True replays each decode step as one CUDA graph (4.11, tinyllm.cuda_graph).
 Both choose tokens with sample_next (4.2).
 """
 
@@ -89,6 +90,7 @@ def generate(
     top_p: float | None = None,
     eos_id: int | None = None,
     generator: torch.Generator | None = None,
+    cuda_graph=False,
 ) -> Tensor:
     """KV-cached generation. Append up to max_new_tokens to idx (B, T).
 
@@ -98,6 +100,9 @@ def generate(
 
     Unlike sample(), the context can't slide: RoPE positions are baked into the cached
     keys. So prompt + max_new_tokens must fit in max_seq_len.
+
+    cuda_graph: False (eager), True (build a GraphDecoder), or a GraphDecoder to reuse,
+    so the graphs it captured serve several calls with the same batch size (4.11).
     """
     B, T = idx.shape
     max_len = model.cfg.max_seq_len
@@ -105,13 +110,22 @@ def generate(
         raise ValueError(f"prompt {T} + new {max_new_tokens} exceeds max_seq_len {max_len}")
     was_training = model.training
     model.eval()
-    cache = KVCache(model.cfg.n_layers, max_len)
-    autocast = dict(device_type=idx.device.type, dtype=torch.bfloat16,
-                    enabled=idx.device.type == "cuda")
+    if cuda_graph:
+        from tinyllm.cuda_graph import GraphDecoder
+        dec = cuda_graph if isinstance(cuda_graph, GraphDecoder) else GraphDecoder(model, B)
+        prefill, decode = dec.prefill, dec.step
+    else:
+        cache = KVCache(model.cfg.n_layers, max_len)
+        autocast = dict(device_type=idx.device.type, dtype=torch.bfloat16,
+                        enabled=idx.device.type == "cuda")
+
+        def prefill(x: Tensor) -> Tensor:
+            with torch.autocast(**autocast):
+                return model(x, cache=cache)[0]
+        decode = prefill
     done = torch.zeros(B, dtype=torch.bool, device=idx.device)
     out = [idx]
-    with torch.autocast(**autocast):
-        logits, _ = model(idx, cache=cache)                    # prefill
+    logits = prefill(idx)
     for i in range(max_new_tokens):
         nxt = sample_next(logits[:, -1, :], temperature, top_k, top_p, generator)
         out.append(nxt)
@@ -121,7 +135,6 @@ def generate(
                 break
         if i + 1 == max_new_tokens:
             break                                              # no forward for a token we won't use
-        with torch.autocast(**autocast):
-            logits, _ = model(nxt, cache=cache)                # decode: one token
+        logits = decode(nxt)                                   # one token per row
     model.train(was_training)
     return torch.cat(out, dim=1)

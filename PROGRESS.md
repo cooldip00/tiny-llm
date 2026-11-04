@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.11 decode-step overhead (4.1–4.6, 4.12 and 4.9a–c done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
-- **Next action:** profile one KV-cached decode step with `torch.profiler` (our 30M model and TinyLlama, B = 1 / 8 / 32). Then CUDA graphs (or `torch.compile(mode="reduce-overhead")`) on the fixed-shape decode step of `generate()`. Done when outputs are identical to eager and ms/step + tok/s are measured (D-024).
+- **Step:** 4.9d TinyLlama benchmarks against the bandwidth ceiling (4.1–4.6, 4.12, 4.9a–c and 4.11 done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
+- **Next action:** rerun the 4.1–4.6 benchmarks on TinyLlama (naive, kv, kv-graph, continuous, INT8) with bf16 weights. Report decode tok/s as a % of the 192 tok/s ceiling and fill the TinyLlama results table in INFERENCE.md. `bench_generate.py` needs TinyLlama prompts (its tokenizer, not ours) and a `--model tinyllama` path.
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
@@ -18,6 +18,27 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.11 CUDA graphs on the decode step
+- `src/tinyllm/cuda_graph.py`:
+  - `StaticKVCache` uses the same cache protocol, so the model code doesn't change.
+    - The position is a device tensor. K/V are written with `index_copy_`, and RoPE is read with `index_select` at that position.
+    - Every step attends over a fixed window of W keys with a mask, covering left padding too.
+  - `GraphDecoder` keeps prefill and sampling eager and captures one graph per length bucket (128, 256, …, max), all in a shared memory pool.
+  - Turned on with `generate(cuda_graph=True | decoder)`. Off by default.
+- Correctness:
+  - Replay is bit-identical to the same static step run eagerly.
+  - Against variable-shape eager it is bf16-close. On the 30M model: argmax agreement 99.41%, and all 12 flips at eager margin ≤ 0.125 (median 1.75). On TinyLlama: 1 flip in 3 × 64 tokens, at margin 0.125.
+  - The cause is SDPA choosing flash for the no-mask eager step and mem-efficient for the masked window.
+  - `tests/test_cuda_graph.py`: 9 tests. Suite: **221 passed**.
+- Speed (bench_generate, 30M, bf16, median of 5): **8.00 → 0.99 ms/step at B=1 (8.1×)**, 8.35 → 1.25 at B=8, 8.64 → 1.75 at B=32 (4.9–8.1× overall). TTFT is unchanged.
+- Profile (`scripts/profile_decode.py`, traces in `runs/profile/`):
+  - Eager was host-bound. Issuing a step took 8–9 ms of CPU whatever the batch. The GPU was idle 58–92% of the time and downclocked to 800–1,410 MHz.
+  - Graph replay keeps 1,875 MHz with the GPU idle ~10%. A launch still costs 0.35–1.4 ms of host time on WSL.
+  - The next limit is ~430 small kernels per step, which needs fusion (4.10 / torch.compile).
+- TinyLlama B=1: 38–48 → **124–133 tok/s, 65–69% of the 192 tok/s ceiling** (GPU idle 3%).
+- `bench_generate.py`: `--engine kv-graph` and `--dtype bf16`. Wrote runs/bench/kv_bf16.json and kv-graph_bf16.json.
+- Next: 4.9d.
 
 ### 2026-11-04 — Step 4.9c logits match HF Transformers
 - `transformers` 5.22.1 added to the `dev` group only. `src/tinyllm` never imports it (D-015).

@@ -245,6 +245,59 @@ Reading:
   - KV-cached `generate()` equals naive `sample()`, and `run_continuous` (slots and paged) equals solo `generate()`, all on the quantized model.
   - The GPU timed loop equals `generate(temperature=0)` on the int8 model.
 
+### 4.11 CUDA graphs on the decode step (2026-11-04)
+- **What:** `src/tinyllm/cuda_graph.py`. Captured by hand with `torch.cuda.CUDAGraph`, with no `torch.compile`. Use it with `generate(..., cuda_graph=True)`, or pass a `GraphDecoder` to reuse its graphs. It is off by default, and the eager path is unchanged.
+  - **`StaticKVCache`** implements the same cache protocol, so the model code doesn't change. The position lives in a device tensor. K/V are written with `index_copy_`, and RoPE is gathered at that position. Every step attends over a fixed window of W keys, and a bool mask hides keys beyond the position and left padding.
+  - **Buckets:** W = 128, 256, …, `max_seq_len`. Each bucket gets one graph, captured on first use. All graphs share one memory pool and the same static input and cache buffers.
+  - **Eager parts:** prefill and sampling. Autocast runs with `cache_enabled=False`, because its weight-cast cache doesn't survive capture.
+  - **Scope:** B = 1 and static batches, with or without left padding. The continuous and paged engines are not covered.
+- **Correctness:**
+  - **Replay equals the same static step run eagerly**, bit for bit (`torch.equal`), across every bucket boundary, on the tiny model and on TinyLlama.
+  - **Against today's eager `generate()` it is only bf16-close.** Eager decode attends over exactly pos + 1 keys with no mask, so SDPA picks flash attention. The graph's masked window gets the mem-efficient kernel instead.
+    - 30M model, teacher-forced, 8 × 256 tokens: max |Δlogit| 0.19 (logit scale 24) and argmax agreement 99.41%. All 12 flips are near-ties: eager's top-2 margin is ≤ 0.125 (one bf16 ulp at |logit| 16–32), against a median of 1.75.
+    - Free-running greedy is identical on 1/8 rows. Four of the divergences fall at exactly the tokens where eager kv already left naive in 4.3 (60, 12, 74, 125). Graph decode matches naive on 3/8 rows, the same as kv did.
+    - TinyLlama, 3 chat prompts × 64 tokens: one flip in total ("haiku", first token, eager margin 0.125 against a median of 1.19). The other two prompts are token-identical.
+    - So the done-when ("outputs equal eager") holds exactly against the static eager step, but only up to bf16 near-ties against the variable-shape eager path, the same standard 4.3 met against naive.
+  - `tests/test_cuda_graph.py` (CUDA only, 9 tests):
+    - replay == static eager step
+    - greedy == eager `generate` across all buckets, on a tiny model with well-separated logits
+    - left-padded batch == `prefill_padded` + eager decode
+    - EOS, decoder reuse, sampling with the same generator
+    - errors for a full cache, wrong batch and a bucket set too small
+    - TinyLlama: flips only at near-ties (≤ 2 ulps), and free-running greedy diverges only at a flip
+- **Speed** (`scripts/bench_generate.py --engine kv | kv-graph --dtype bf16`): 30M model, bf16 weights (D-023), 256 new tokens, median of 5 runs. Prompt 512 is skipped because 512 + 256 > `max_seq_len`.
+
+| B | Prompt | eager kv ms/step (tok/s) | kv-graph ms/step (tok/s) | Speedup |
+|---|---|---|---|---|
+| 1 | 32 | 8.00 (125) | 0.99 (1,014) | 8.1× |
+| 1 | 128 | 8.08 (124) | 1.08 (928) | 7.5× |
+| 8 | 32 | 8.30 (964) | 1.19 (6,744) | 7.0× |
+| 8 | 128 | 8.35 (958) | 1.25 (6,403) | 6.7× |
+| 32 | 32 | 8.53 (3,751) | 1.56 (20,477) | 5.5× |
+| 32 | 128 | 8.64 (3,702) | 1.75 (18,297) | 4.9× |
+
+  - TTFT is unchanged, since prefill is the same eager code (8–19 ms either way).
+  - Peak VRAM is higher with graphs (237–599 MiB against 76–395 MiB). That includes the graph pool, and in this script the decoders kept alive for the other batch sizes, so it is not a clean per-row figure.
+- **Profile** (`scripts/profile_decode.py`, bf16, context 128; Chrome traces in `runs/profile/`): one decode step, eager against graph. Wall time is synced. "Host issue" is the time Python takes to issue one step starting from an empty GPU queue. GPU busy and idle come from 20 profiled steps. The SM clock is the nvidia-smi median over 2 s of decoding.
+
+| Model, B | Mode | ms/step | Host issue (ms) | GPU busy (ms) | GPU ops | GPU idle | SM clock | Power |
+|---|---|---|---|---|---|---|---|---|
+| 30M, 1 | eager | 8.64 | 8.20 | 3.97 | 372 | 75% | 1,410 MHz | 35 W |
+| 30M, 1 | graph | 1.25 | 0.35 | 1.09 | 412 | 10% | 1,875 MHz | 69 W |
+| 30M, 32 | eager | 9.28 | 8.80 | 6.95 | 404 | 58% | 1,410 MHz | 40 W |
+| 30M, 32 | graph | 1.83 | 0.63 | 1.88 | 452 | 11% | 1,875 MHz | 105 W |
+| TinyLlama, 1 | eager | 26.0 | 25.9 | 8.03 | 1,068 | 83% | 1,380 MHz | 45 W |
+| TinyLlama, 1 | graph | 8.06 | 1.36 | 7.90 | 1,164 | 3% | 1,875 MHz | 125 W |
+
+- **Reading:**
+  - **Eager decode was host-bound at every size we run.** Issuing a step costs the CPU 8–9 ms on the 30M model (26 ms for TinyLlama's 22 layers), whatever the batch. The GPU sits idle 58–92% of the time (across runs) and downclocks to ~1,400 MHz (~800 MHz in one run).
+    - With the GPU slower, its own kernels stretch too: eager GPU-busy time fluctuates between runs (1.2–4.0 ms at B=1, 2.2–9.5 ms at B=32), against a steady 1.1–1.9 ms for graph replay at 1,875 MHz.
+    - So the earlier "~9.5 ms at every batch size" (4.1, 4.6) was launch overhead, as suspected. The 4.12 low-clock reading has the same cause.
+  - **Graphs make the 30M model GPU-bound** (idle ~10%). A graph launch still costs ~0.35–1.4 ms of host time on WSL, growing with node count. The next limit is GPU time across ~410–450 small kernels, about 2.5–4 µs each. Only fusion lowers that: `torch.compile` or Triton (4.10).
+  - **TinyLlama B=1: 38–48 → 124–133 tok/s over two runs, about 65–69% of the 192 tok/s bandwidth ceiling** (20–25% before). The GPU is now busy 97% of the time. The rest of the gap to the ceiling is kernel efficiency, not overhead, and 4.9d will measure it properly.
+  - The graph step runs a few more ops than eager (mask, `index_select`, `index_copy_`), and its attention kernel differs. Both are small next to the launches they remove.
+- Not done: graphs for the continuous and paged engines (bucketed by slot count), and `torch.compile(mode="reduce-overhead")` as a comparison. Both are in PARKING_LOT.
+
 ## Results: TinyLlama 1.1B (fill in)
 | Step | Batch | Prompt | Decode tok/s | % of ceiling | TTFT (ms) | Peak VRAM | Notes |
 |---|---|---|---|---|---|---|---|

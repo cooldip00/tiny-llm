@@ -48,3 +48,6 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
   6. Mini sparse memory finetuning (continual learning without forgetting)
   7. TRM/HRM-style Sudoku: recursion vs depth
   8. BabyLM Strict-Small (learning from a child-sized ~10M-word budget)
+
+- [2026-11-04] **CUDA graphs for the continuous / paged engines** (4.11 stretch). Bucket by slot count and by the longest slot's length. `SlotKVCache` already keeps its lengths on the device; `begin_step` would need a fixed `_end` (the bucket) instead of `max(self.lens) + 1`. Paged attention needs a fixed block-table shape too.
+- [2026-11-04] **`torch.compile(mode="reduce-overhead")` vs manual graphs** (4.11 comparison). After 4.11 the 30M step is GPU-bound across ~430 small kernels (2.5–4 µs each). Fusion (compile, or Triton in 4.10) is the next lever. Also check: graph replay costs 0.35–1.4 ms of host time on WSL, growing with node count. Is that WSL-specific?

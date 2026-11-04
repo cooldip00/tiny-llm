@@ -17,6 +17,9 @@ tinyllm.generate.sample(temperature=0) before any timing.
 
 Step 4.3 adds --engine kv (KV cache: one prefill, then one token per forward). It skips
 rows where prompt + new tokens exceed max_seq_len, since a cache can't slide the window.
+
+Step 4.11 adds --engine kv-graph (each decode step one CUDA-graph replay, tinyllm.cuda_graph)
+and --dtype bf16 (weights stored bf16, D-023; output runs/bench/<engine>_bf16.json).
 """
 
 import argparse
@@ -29,10 +32,11 @@ import numpy as np
 import torch
 
 from tinyllm.config import ModelConfig
+from tinyllm.cuda_graph import GraphDecoder
 from tinyllm.data import load_tokens
 from tinyllm.generate import generate, sample
 from tinyllm.kv_cache import KVCache
-from tinyllm.model import Transformer
+from tinyllm.model import RotaryEmbedding, Transformer
 from tinyllm.provenance import Provenance
 from tinyllm.train import load_checkpoint
 
@@ -96,7 +100,37 @@ def kv_greedy(model: Transformer, prompt: torch.Tensor, new_tokens: int):
     return torch.cat(out, dim=1), t_first - t0, time.perf_counter() - t_first
 
 
-ENGINES = {"naive": naive_greedy, "kv": kv_greedy}
+_DECODERS: dict = {}
+
+
+@torch.no_grad()
+def kv_graph_greedy(model: Transformer, prompt: torch.Tensor, new_tokens: int):
+    """Same computation as generate(temperature=0, cuda_graph=dec), timed like kv_greedy.
+    One GraphDecoder per batch size is kept across runs, so the warm-up runs capture the
+    graphs and the timed runs only replay them."""
+    key = (id(model), prompt.shape[0])
+    if key not in _DECODERS:
+        _DECODERS[key] = GraphDecoder(model, prompt.shape[0])
+    dec = _DECODERS[key]
+    out = [prompt]
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    t_first = t0
+    logits = dec.prefill(prompt)
+    for i in range(new_tokens):
+        nxt = logits[:, -1, :].float().argmax(dim=-1, keepdim=True)
+        out.append(nxt)
+        if i == 0:
+            torch.cuda.synchronize()
+            t_first = time.perf_counter()
+        if i + 1 == new_tokens:
+            break
+        logits = dec.step(nxt)
+    torch.cuda.synchronize()
+    return torch.cat(out, dim=1), t_first - t0, time.perf_counter() - t_first
+
+
+ENGINES = {"naive": naive_greedy, "kv": kv_greedy, "kv-graph": kv_graph_greedy}
 
 
 def kv_vs_naive(model, device) -> str:
@@ -122,9 +156,40 @@ def kv_vs_naive(model, device) -> str:
             f"argmax agreement {argmax_agree:.2%}")
 
 
+def graph_vs_kv(model, device) -> str:
+    """Greedy tokens of kv-graph vs eager kv and naive; then, teacher-forced on eager kv's own
+    tokens, the logit gap and how close to a tie every top-1 flip is (eager's top-2 margin)."""
+    prompts = make_prompts(8, 128, device)
+    graph = kv_graph_greedy(model, prompts, 256)[0]
+    seq = kv_greedy(model, prompts, 256)[0]
+    naive = naive_greedy(model, prompts, 256)[0]
+
+    def first(a, b):
+        same = a[:, 128:] == b[:, 128:]
+        return int(same.all(1).sum()), [int((~r).nonzero()[0]) if (~r).any() else None for r in same]
+    cache = KVCache(model.cfg.n_layers, model.cfg.max_seq_len)
+    dec = GraphDecoder(model, 8)
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        eager = [model(seq[:, :128], cache=cache)[0][:, -1:]]
+        eager += [model(seq[:, t:t + 1], cache=cache)[0] for t in range(128, seq.shape[1] - 1)]
+    g = [dec.prefill(seq[:, :128])[:, -1:].float()]
+    g += [dec.step(seq[:, t:t + 1]).float() for t in range(128, seq.shape[1] - 1)]
+    eager, g = torch.cat(eager, 1).float(), torch.cat(g, 1)
+    top2 = eager.topk(2, -1).values
+    margin = top2[..., 0] - top2[..., 1]
+    flips = g.argmax(-1) != eager.argmax(-1)
+    n_kv, d_kv = first(graph, seq)
+    n_nv, d_nv = first(graph, naive)
+    return (f"kv-graph vs eager kv (8x128 prompts, 256 tokens): identical {n_kv}/8 rows, first divergence "
+            f"{d_kv}; vs naive: {n_nv}/8, {d_nv}. Teacher-forced: max |logit diff| "
+            f"{(g - eager).abs().max():.3f} (scale {eager.abs().max():.1f}), argmax agreement "
+            f"{1 - flips.float().mean():.2%}, {int(flips.sum())} flips, eager margin at flips max "
+            f"{margin[flips].max() if flips.any() else 0:.3f} (median margin {margin.median():.3f})")
+
+
 def bench(model, engine, batch, prompt_len, new_tokens, warmup, repeats, device) -> dict:
     run = ENGINES[engine]
-    if engine == "kv" and prompt_len + new_tokens > model.cfg.max_seq_len:
+    if engine != "naive" and prompt_len + new_tokens > model.cfg.max_seq_len:
         return {"batch": batch, "prompt_len": prompt_len, "new_tokens": new_tokens,
                 "skipped": "prompt + new exceeds max_seq_len (no sliding window with a cache)"}
     prompt = make_prompts(batch, prompt_len, device)
@@ -157,12 +222,18 @@ def main() -> None:
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--repeats", type=int, default=5)
     p.add_argument("--engine", choices=sorted(ENGINES), default="naive")
-    p.add_argument("--out", default=None, help="default: runs/bench/<engine>.json")
+    p.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32",
+                   help="weight storage; both run under bf16 autocast. bf16 is D-023's inference layout")
+    p.add_argument("--out", default=None, help="default: runs/bench/<engine>[_bf16].json")
     args = p.parse_args()
-    args.out = args.out or f"runs/bench/{args.engine}.json"
+    args.out = args.out or f"runs/bench/{args.engine}{'_bf16' if args.dtype == 'bf16' else ''}.json"
     device = "cuda"
 
     model = load_model(Path(args.ckpt), device)
+    if args.dtype == "bf16":
+        model.to(torch.bfloat16)
+        cfg = model.cfg       # keep the RoPE tables fp32, as hf_llama.load_from_dir does
+        model.rope = RotaryEmbedding(cfg.head_dim, cfg.max_seq_len, cfg.rope_theta).to(device)
     n_params = sum(t.numel() for t in model.parameters())
     print(f"{torch.cuda.get_device_name()} | torch {torch.__version__} | "
           f"{n_params / 1e6:.1f}M params | max_seq_len {model.cfg.max_seq_len}")
@@ -179,9 +250,16 @@ def main() -> None:
             "timed kv loop diverges from generate(temperature=0)"
         print("check: timed kv loop == generate(temperature=0): OK")
         print("check:", kv_vs_naive(model, device))
+    if args.engine == "kv-graph":
+        g_check = kv_graph_greedy(model, check, 64)[0]
+        assert torch.equal(g_check, generate(model, check, 64, temperature=0, cuda_graph=True)), \
+            "timed kv-graph loop diverges from generate(temperature=0, cuda_graph=True)"
+        print("check: timed kv-graph loop == generate(temperature=0, cuda_graph=True): OK")
+        print("check:", graph_vs_kv(model, device))
 
     rows = []
-    prov = Provenance(weights="fp32 + bf16 autocast", script="bench_generate", engine=args.engine).start()
+    prov = Provenance(weights=f"{args.dtype} + bf16 autocast", script="bench_generate",
+                      engine=args.engine).start()
     for b in map(int, args.batch_sizes.split(",")):
         for plen in map(int, args.prompt_lens.split(",")):
             r = bench(model, args.engine, b, plen, args.new_tokens, args.warmup, args.repeats, device)
@@ -196,7 +274,7 @@ def main() -> None:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"engine": args.engine, "ckpt": args.ckpt, "gpu": torch.cuda.get_device_name(),
+    out.write_text(json.dumps({"engine": args.engine, "dtype": args.dtype, "ckpt": args.ckpt, "gpu": torch.cuda.get_device_name(),
                                "torch": torch.__version__, "provenance": prov.finish(), "rows": rows}, indent=2))
     print(f"wrote {out}")
 
