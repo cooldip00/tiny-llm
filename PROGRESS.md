@@ -6,6 +6,9 @@
 - **Next action:** read docs/INFERENCE.md, then benchmark naive generation with `checkpoints/main/best.pt`
 - **Blockers:** none
 - **Open decisions:** none
+- **Scope (D-021):** **v1-preview** by about 2026-11-11 (4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, first README, public repo); **v1** by about 2026-11-18 (4.4 + 4.5 → 4.8, rest of Phase 6). 4.7 and 4.10 only if ahead. Phase 5 and Phase 7 deferred.
+- **Daily:** ~30 min explaining the day's work out loud (feeds 6.6).
+- **Housekeeping:** push the repo to a public GitHub repo (no remote is set up yet; 20 commits so far).
 - **Housekeeping:** delete the old doc copies in `D:\ResumeProject\tiny-llm` (keep `MOVED.md`). My automatic delete was blocked.
 - **Reminder:** the W&B/Forge trial ends around 2026-12-02. Downgrade to Free then.
 
@@ -13,6 +16,14 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Scope decision for v1 (D-021)
+- No code changes. Planning only.
+- Decided: two milestones following the step dependencies. **v1-preview** (~2026-11-11): 4.1–4.3, 4.6, 4.9a–d, first README, public repo. **v1** (~2026-11-18): 4.4 + 4.5, 4.8, rest of Phase 6. A single one-week deadline for everything was judged too tight.
+- 4.4 + 4.5 are done together, and 4.5 (paged KV) is must-do because it links to prior allocator experience. 4.8 (vLLM / llama.cpp comparison) is must-do for credibility.
+- Deferred, not dropped: Phase 5 ablation, and new Phase 7 future research (Weight-Space Programming replication, experiments from the research report).
+- Docs updated (additions only): DECISIONS D-021; PLAN (`[>]` status key, Phase 4 priority, Phase 5 deferral note, 6.5 publish, 6.6 self-check, Phase 7, revised timeline); PARKING_LOT (D-021 section); RESEARCH ("Future directions"); PRIOR_ART (423 GB/s update, positioning update, PA-2); CLAUDE.md (goal 3 deferral note).
+- Next: 4.1. Read docs/INFERENCE.md, then benchmark naive generation with `checkpoints/main/best.pt`.
 
 ### 2026-11-03 — Step 3.7 main run · Phase 3 complete
 - Run: `--preset main --max_steps 7600 --run_name main-3.7`, D-019 defaults, compiled (D-020). Logged online: [run `ugd124lz`](https://forge.coreweave.com/wandb/cooldip00-personal/tinyllm/runs/ugd124lz). Log in `checkpoints/main/train.log`.

@@ -20,6 +20,9 @@ runs/
 .env
 .netrc
 
+# Personal notes (local only, never pushed)
+*.local.md
+
 # Editors / OS
 .vscode/
 .idea/

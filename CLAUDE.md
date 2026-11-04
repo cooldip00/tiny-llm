@@ -4,7 +4,7 @@
 Build a small Llama-style LLM **from scratch** on a single RTX 3070 Ti Laptop (8 GB), then:
 1. Train it (TinyStories first).
 2. Build our own inference engine and learn how inference works at scale.
-3. Run a small, honest research ablation: **can we swap attention for something more efficient?**
+3. Run a small, honest research ablation: **can we swap attention for something more efficient?** _(Deferred per D-021: future work after v1. Don't start Phase 5 or Phase 7 before v1 ships.)_
 4. Write it up as a resume-quality project.
 
 ## Session start ritual (every session, every context reset)

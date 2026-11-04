@@ -128,3 +128,24 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **Guarded by:** a CUDA test that checks compiled losses match eager and that checkpoint keys have no `_orig_mod.` prefix. The CPU tests use eager (`tiny_cfg` sets `compile=False`).
 - **Consequence for Phase 5:** run-to-run noise is large early in training, so ablations need several seeds (as D-013 planned) and should compare late or final val loss, not early steps.
 - **Rejected:** keeping eager as the default (the main run would take ~4.2 h instead of ~2.7 h); compiling eval and sampling too (sampling changes the sequence length each token, which forces recompiles, for little gain).
+
+---
+
+### D-021 — v1 scope: inference core first, research ablation deferred · ACCEPTED (2026-11-04)
+- **Context:** v1 is time-boxed and focused on the serving engine. Time is the constraint, not compute.
+- **Choice:** two milestones, following the step dependencies (4.3 → 4.4 → 4.5; 4.9 needs 4.3 plus `gqa` from 4.9a).
+  - **v1-preview, by about 2026-11-11:** 4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, a first README (6.1 draft), public repo (6.5a). The first result worth sharing.
+  - **v1, by about 2026-11-18:** 4.4 + 4.5 together → 4.8 → the rest of Phase 6 (including the new 6.5 publish and 6.6 self-check).
+  - **Optional, only if ahead:** 4.7 speculative decoding, 4.10 Triton (D-016 timebox still applies).
+  - **Deferred, not dropped:** Phase 5 research ablation, and the new Phase 7 future-research items. Marked `[>]` in PLAN.md. Resume them after v1.
+  - The dates are estimates. If a milestone slips, cut optional steps first, then move the date. Don't skip correctness checks (e.g. 4.9c) to hit it.
+- **Why:**
+  - Training a small GPT from scratch is a common portfolio project (nanoGPT, llama2.c), so on its own it doesn't stand out.
+  - The inference engine, measured against the hardware bandwidth ceiling and against production engines (vLLM / llama.cpp), is the differentiator, and it matches skills that are in demand right now.
+  - **v1-preview first:** KV cache, INT8 and TinyLlama with matched logits already make a complete, measurable story. Batching and the production comparison build on it.
+  - **4.4 and 4.5 go together:** a paged KV cache only pays off when many requests of different lengths share memory, which is what continuous batching creates. Alone, 4.5 has nothing to show.
+  - **4.5 is must-do, not optional:** a block allocator for the KV cache ties directly to prior PyTorch caching-allocator experience (block splitting and merging against fragmentation). That link is the core of the writeup's story.
+  - Phase 5 at 30M params costs a lot of GPU time (4 variants × 2–3 seeds) and isn't needed for v1's serving story.
+- **Consequence:** the Phase 6 writeup says plainly that the ablation is future work. No Phase 5 claims on the resume until it's done.
+- **Rejected:** doing Phase 5 now (weeks of GPU time, not needed for v1); skipping straight to the writeup with training results only (too common to stand out); adding new research tracks before v1 (scope creep; parked instead); a single one-week deadline for everything (too tight for the dependency chain).
+- **Revisit** after v1, or earlier if research becomes the priority (new entry required).

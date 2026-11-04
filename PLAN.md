@@ -1,6 +1,8 @@
 # Master Plan
 
-Status keys: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (say why in PROGRESS.md)
+Status keys: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (say why in PROGRESS.md) · `[>]` deferred to future work (see D-021; not dropped)
+
+**Current priority (D-021, 2026-11-04):** **v1-preview** by about 2026-11-11, **v1** by about 2026-11-18 (see Phase 4 priority and the revised timeline). Phase 5 and Phase 7 are deferred until after v1.
 
 Each phase ends with **Done when** checks. Don't start the next phase until they pass.
 
@@ -57,6 +59,14 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ---
 
 ## Phase 4 — Inference Engine (see docs/INFERENCE.md)
+
+**Priority (D-021):**
+- **v1-preview (~2026-11-11), in order:** 4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, then a first README and public repo
+- **v1 (~2026-11-18), in order:** 4.4 + 4.5 together → 4.8, then the rest of Phase 6
+- **Optional, only if ahead:** 4.7, 4.10
+- Why 4.4 + 4.5 together: paged KV only pays off when continuous batching mixes requests of different lengths.
+- Why 4.8 is must-do: comparing against vLLM / llama.cpp is what makes every other number credible.
+
 - [ ] 4.1 Naive generation (recomputes the full sequence each step): baseline tok/s
 - [ ] 4.2 Sampling: temperature, top-k, top-p
 - [ ] 4.3 KV cache: measure the speedup against 4.1
@@ -84,6 +94,9 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ---
 
 ## Phase 5 — Research Ablation (see docs/RESEARCH.md)
+
+> `[>]` **Deferred (D-021, 2026-11-04):** future work after v1. The steps below stay as planned. Note: 5.2's `gqa` is still built in 4.9a.
+
 - [ ] 5.1 Freeze the fixed-budget config (params, tokens, steps, LR schedule)
 - [ ] 5.2 Implement variants: `mla`, `gdn_hybrid` (via `fla`). `gqa` already exists from 4.9a
 - [ ] 5.3 Run every variant × 2–3 seeds
@@ -99,6 +112,27 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [ ] 6.2 Plots: loss curves, inference speedups, ablation trade-offs
 - [ ] 6.3 3–4 resume bullets with real numbers
 - [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
+- [ ] 6.5 Publish (added by D-021), in this order:
+  - [ ] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots
+  - [ ] 6.5b Hugging Face: our model with a model card, plus a small Gradio Space demo
+  - [ ] 6.5c W&B project set to public; link the training curves from the README
+  - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume
+  - [ ] 6.5e LinkedIn: three posts, one per milestone (training done → KV cache + paged KV → TinyLlama results)
+  - [ ] 6.5f r/LocalLLaMA (and r/MachineLearning with a [P] tag) once the TinyLlama numbers are in
+  - [ ] 6.5g Direct outreach: send the repo to engineers at companies building inference products
+- [ ] 6.6 Self-check before sharing (added by D-021): explain every file out loud without notes, e.g. why the KV cache helps, why decode is memory-bandwidth bound, how the paged allocator handles fragmentation, why tied embeddings, the 6N + 12LdT FLOPs formula, why compile helped. Anything that can't be defended stays off the resume.
+
+**Done when (6.5–6.6):** the repo is public with results, at least one post is live, and every resume bullet is backed by a number in PROGRESS.md.
+
+---
+
+## Phase 7 — Future Research (after v1)
+
+> `[>]` **Deferred (D-021).** Not part of v1. Details and caveats are in [PARKING_LOT.md](PARKING_LOT.md) and the "Future directions" section of [docs/RESEARCH.md](docs/RESEARCH.md).
+
+- [>] 7.1 Phase 5 ablation (above), first in line once v1 ships
+- [>] 7.2 Weight-Space Programming replication: can a non-GPT editor (e.g. Claude) fix Qwen3.5-0.8B's reasoning loops by editing weights directly? (see PRIOR_ART PA-2)
+- [>] 7.3 Pick one or two experiments from the "machines that learn, not imitate" research report (see PARKING_LOT and RESEARCH.md); check each one's prior work first
 
 ---
 
@@ -110,3 +144,18 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 | Day 1 afternoon/evening | 4.1–4.8 |
 | Day 2 | 4.9–4.10 (Track B), start 5 |
 | Day 3+ | 5, 6 |
+
+### Revised timeline (D-021, 2026-11-04)
+The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-03).
+
+| Block | Steps |
+|---|---|
+| 2026-11-04 → 11-05 | 4.1, 4.2, 4.3 (baseline, sampling, KV cache); push repo to GitHub |
+| 2026-11-06 → 11-07 | 4.6 INT8; 4.9a–b (`gqa`, load TinyLlama weights and tokenizer) |
+| 2026-11-08 → 11-11 | 4.9c–d (logits match HF, benchmarks vs the bandwidth ceiling); first README; repo public → **v1-preview** |
+| 2026-11-12 → 11-15 | 4.4 + 4.5 (continuous batching + paged KV) |
+| 2026-11-16 → 11-18 | 4.8 vLLM / llama.cpp comparison; rest of Phase 6 (6.1–6.3, 6.5, 6.6) → **v1** |
+| If ahead | 4.7, 4.10 |
+| After v1 | Phase 5, Phase 7 |
+
+Every day: ~30 min explaining that day's work out loud (feeds 6.6).

@@ -20,3 +20,22 @@ Format: `- [date] idea — why it's interesting — which phase it might fit`
 
 ## Added during work
 - ~~[2026-11-03] `torch.compile` on the training step — likely +20–40% tok/s by fusing RMSNorm/RoPE/SwiGLU element-wise ops (MFU is 31–36% today) — before the 3.7 main run if time matters, needs a DECISIONS entry~~ → done before 3.7: **+57%**, on by default (D-020).
+
+## Deferred by D-021 (2026-11-04) — future research, after v1
+These map to PLAN Phase 7. Don't start any of them before v1 ships.
+
+- [2026-11-04] **Weight-Space Programming replication** — MIT CSAIL (Takehi, Teoh, Zhang, Khattab), blog post 2026-11-02: GPT-6 Astra, given a Python kernel over Qwen3.5-0.8B's weights and a budget of forward passes, traced a reasoning-loop direction in the layer 15 and 19 MLPs and subtracted it from 131,072 weights (0.016%). No gradients. MATH-500 7.9 → 48.1 at 50 forward passes. The open question: does a non-GPT editor (e.g. Claude) manage the same? Also relevant to continual learning (tiny edits, no retraining) — PLAN 7.2. Details and caveats in PRIOR_ART PA-2.
+  - Blog: https://rikiyat.github.io/blog/weight-space-programming/
+  - Logs: https://github.com/RikiyaT/lm_understand-logs
+  - Edited model: https://huggingface.co/RikiyaT/Qwen3.5-0.8B-weight-space-programming
+  - 8 GB budget: a full replication (512 problems × 32K thinking tokens per forward pass) is too slow here. Scale down (~100 problems, 4K-token cap) and say so in any writeup.
+
+- [2026-11-04] **Experiments from the "machines that learn, not imitate" research report** — PLAN 7.3. Report: `D:\ResumeProject\research-learning-not-imitation\reports\Machines that learn not imitate.md`; notes in `research_notes\`. Each was sized for one 8 GB GPU. Check prior work before starting any of them: some novelty claims and arXiv links in the report were not verified.
+  1. Recall probes added to the Phase 5 ablation — **known flaw:** we train at max_seq_len 512, so a 2K–8K needle test measures length extrapolation, not recall. Test within the trained length, or train longer.
+  2. From-scratch RLVR vs SFT on arithmetic — **possible prior work** (unverified): "Echo Chamber: RL Post-training Amplifies Behaviors Learned in Pretraining" (Zhao et al., 2025). Frame as a replication if it overlaps.
+  3. Grokking prediction sweep — **possible prior work** (unverified): "Predicting Grokking Long Before It Happens" (Notsawo et al., 2023).
+  4. Othello world-model emergence (probe for a board-state representation) — runtime is ~2.9 h for 1.2B tokens, not the ~2 h the report says.
+  5. Loss of plasticity in a tiny GPT (continual-backprop style)
+  6. Mini sparse memory finetuning (continual learning without forgetting)
+  7. TRM/HRM-style Sudoku: recursion vs depth
+  8. BabyLM Strict-Small (learning from a child-sized ~10M-word budget)

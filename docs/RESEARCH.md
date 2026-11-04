@@ -1,5 +1,7 @@
 # Research: Efficient Attention Ablation
 
+> **Status: deferred (D-021, 2026-11-04).** Future work after v1; the design below is unchanged and still the plan. The Phase 6 writeup lists this as future work and makes no claims from it.
+
 ## Question
 At a fixed training budget, how much **model quality** do we give up for **inference efficiency** (KV-cache memory, decode speed) when we replace standard multi-head attention?
 
@@ -51,3 +53,21 @@ Param counts differ slightly across variants. Report them, and adjust width or f
 
 ## Findings
 _Write after 5.5._
+
+---
+
+## Future directions (PLAN Phase 7, deferred by D-021)
+Beyond the attention ablation. The long-term question: can a machine **learn**, rather than only imitate its training data, with far less data? (A child hears roughly 6–60M words by age 5; LLMs train on trillions of tokens.)
+
+**Source:** a literature review done on 2026-11-04, saved in `D:\ResumeProject\research-learning-not-imitation\` (report in `reports\`, per-topic notes in `research_notes\`). It's a starting map, not verified work: check prior work and links before relying on any claim.
+
+**Main takeaways from that review:**
+- **Cheap checkers, not new neurons.** The biggest gains beyond imitation came where a cheap, reliable checker of results exists: self-play in games (AlphaGo Zero), proof checkers (AlphaProof), test-based code and maths rewards (RL from verifiable rewards). Without such a checker, learning from experience is much harder.
+- **New units mostly buy speed, not learning.** KANs, spiking neurons and SSMs / linear attention (Mamba, RWKV, Gated DeltaNet) mainly trade quality for efficiency, which is what Phase 5 measures. They don't by themselves fix sample efficiency.
+- **World models help where the world can be simulated**: large sample-efficiency gains in games and robotics (e.g. Dreamer, EfficientZero). Results in open-ended language settings are weaker.
+- **Continual learning is unsolved.** Loss of plasticity and catastrophic forgetting are still open, with recent approaches (Titans, test-time training, sparse memory finetuning) as partial answers.
+- **Tiny recursive reasoners are worth watching.** TRM (7M params) showed strong ARC puzzle results; critiques point at puzzle-specific tricks (augmentation, voting).
+
+**Candidate experiments:** the 8 listed in [PARKING_LOT.md](../PARKING_LOT.md), with known caveats, plus the Weight-Space Programming replication ([PRIOR_ART.md](PRIOR_ART.md) PA-2).
+
+**How this links to the current ablation:** Phase 5 asks how much quality we give up for efficiency. Phase 7 asks the opposite question: how much ability we get per token of data. The same model code, training loop and benchmark discipline serve both.
