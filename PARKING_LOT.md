@@ -23,6 +23,11 @@ Format: `- [date] idea — why it's interesting — which phase it might fit`
 - [2026-11-04] `tests/test_model.py::test_initial_loss_near_uniform` is unseeded, so it depends on global RNG order: it fails when run alone (9.11 vs 9.01 ± 0.1) and passes in the full suite. Seed it, or loosen the tolerance with a reason. Found in 4.2.
 - [2026-11-04] Batch-1 decode is overhead-bound (~10 ms/step, ~1.5% of the bandwidth ceiling, from 4.1). CUDA graphs or `torch.compile(mode="reduce-overhead")` on the decode step, plus keeping bf16 weights instead of autocast re-casting each step, could be the bigger B=1 win than the KV cache. Measure after 4.3; needs a DECISIONS entry.
 - [2026-11-04] Continuous batching admits with a blocking prefill: running slots stall while newcomers prefill (a continuous step is ~13.2 ms vs ~12.2 ms for a static one, in 4.4). Chunked prefill (split a prompt into chunks interleaved with decode steps, as in vLLM / Sarathi) would smooth this out. An arrival-process workload (Poisson arrivals) would also make the 4.4 latency numbers more realistic than "all queued at t=0".
+- [2026-11-04] From 4.5 (paged KV):
+  - (a) A paged-attention kernel (Triton) that reads K/V blocks in place through the block table, instead of gathering them into a contiguous copy every step. This would also fit Phase 7.
+  - (b) Decode only the active rows. Today every slot runs, even empty ones, so 64 slots with ≤25 active wastes ~60% of the rows.
+  - (c) An admission watermark, or a reserve-on-admit policy, to cut preemption thrash: 42 recomputes per 64 requests in a 64 MiB budget.
+  - (d) Prefix caching: share the blocks of a common prompt prefix through refcounts (the 4.5 stretch goal).
 
 ## Deferred by D-021 (2026-11-04) — future research, after v1
 These map to PLAN Phase 7. Don't start any of them before v1 ships.

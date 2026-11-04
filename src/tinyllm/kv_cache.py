@@ -169,8 +169,18 @@ class SlotKVCache:
         self._first_dev.copy_(torch.tensor(self.first))
         self._active_dev.copy_(torch.tensor(self.active, dtype=torch.long))
 
+    def can_admit(self, lengths: list[int]) -> bool:
+        return True                                          # a free slot is all a request needs
+
+    def reserve_step(self) -> list[int]:
+        return []                                            # never preempts: capacity is per slot
+
     def used_tokens(self) -> int:
         return sum(n - f for n, f, a in zip(self.lens, self.first, self.active) if a)
+
+    def allocated_tokens(self) -> int:
+        """KV positions claimed by running sequences (a whole slot each)."""
+        return sum(self.active) * self.max_len
 
     def reserved_tokens(self) -> int:
         return self.n_slots * self.max_len

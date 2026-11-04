@@ -121,6 +121,15 @@ def test_utilisation_stats(model):
     assert 0 < c["kv_used_peak"] <= 1
 
 
+@pytest.mark.parametrize("kv", ["slots", "paged"])
+def test_requests_that_only_fit_alone_are_not_batched(model, kv):
+    # Each fits max_len 48 alone (40 + 5, 2 + 40); padded together they'd need 40 + 40.
+    # (Found in 4.5: a preempted request returns with a longer context.)
+    reqs = [Request(list(range(1, 41)), 5), Request([3, 4], 40)]
+    results, _ = run_continuous(model, reqs, n_slots=2, kv=kv, block_size=4)
+    assert [r.tokens for r in results] == [solo(model, r) for r in reqs]
+
+
 def test_too_long_raises(model):
     long = [Request([1] * 40, 10)]
     with pytest.raises(ValueError, match="max_seq_len"):

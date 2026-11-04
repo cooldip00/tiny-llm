@@ -50,7 +50,11 @@ class Stats:
     useful_rows: int = 0       # rows whose output was kept
     kv_reserved_tokens: int = 0            # KV capacity held (max over the run)
     kv_used_frac: list[float] = field(default_factory=list)  # per decode step: real tokens / capacity
+    kv_alloc_frac: list[float] = field(default_factory=list)  # per decode step: real tokens / claimed
     kv_bytes_per_token: int = 0
+    preemptions: int = 0
+    peak_active: int = 0
+    kv_allocated_at_end: int = 0           # leak check: must be 0 once every request is done
 
     def summary(self, results: list[Result]) -> dict:
         lat = sorted(r.latency_s for r in results)
@@ -70,6 +74,11 @@ class Stats:
             "kv_reserved_mib": self.kv_reserved_tokens * self.kv_bytes_per_token / 2**20,
             "kv_used_mean": sum(self.kv_used_frac) / max(1, len(self.kv_used_frac)),
             "kv_used_peak": max(self.kv_used_frac, default=0.0),
+            "kv_alloc_used_mean": (sum(self.kv_alloc_frac) / len(self.kv_alloc_frac)
+                                   if self.kv_alloc_frac else None),
+            "preemptions": self.preemptions,
+            "peak_active": self.peak_active,
+            "kv_allocated_at_end": self.kv_allocated_at_end,
         }
 
 
@@ -155,14 +164,27 @@ def run_static(model: Transformer, requests: list[Request], batch_size: int,
 @torch.no_grad()
 def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
                    max_len: int | None = None, temperature: float = 0.0, top_k=None,
-                   top_p=None, generator=None) -> tuple[list[Result], dict]:
+                   top_p=None, generator=None, kv: str = "slots", block_size: int = 16,
+                   kv_blocks: int | None = None) -> tuple[list[Result], dict]:
+    """kv="slots": SlotKVCache, every slot reserves max_len positions (4.4).
+    kv="paged": PagedKVCache with kv_blocks blocks of block_size tokens (4.5). Default
+    kv_blocks = the same memory as the slot cache. Sequences beyond what the blocks hold are
+    preempted and recomputed later."""
     model.eval()
     cfg = model.cfg
     device = next(model.parameters()).device
     max_len = max_len or cfg.max_seq_len
     pick = dict(temperature=temperature, top_k=top_k, top_p=top_p, generator=generator)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    slots = SlotKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, max_len, dtype, device)
+    if kv == "slots":
+        slots = SlotKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, max_len, dtype, device)
+    elif kv == "paged":
+        from tinyllm.paged_kv import PagedKVCache
+        n_blocks = kv_blocks or n_slots * math.ceil(max_len / block_size)
+        slots = PagedKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, n_blocks,
+                             block_size, max_len, dtype, device)
+    else:
+        raise ValueError(f"kv must be 'slots' or 'paged', got {kv!r}")
     stats = Stats(kv_bytes_per_token=_kv_bytes_per_token(model, device),
                   kv_reserved_tokens=slots.reserved_tokens())
     results: list[Result | None] = [None] * len(requests)
@@ -173,6 +195,10 @@ def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
     queue = deque(range(len(requests)))
     t0 = time.perf_counter()
 
+    def context(rid: int) -> list[int]:
+        """Prompt plus tokens generated so far (non-empty only after a preemption)."""
+        return requests[rid].prompt + outs.get(rid, [])
+
     def record(s: int, rid: int, tok: int, now: float) -> None:
         outs[rid].append(tok)
         if len(outs[rid]) == 1:
@@ -182,16 +208,31 @@ def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
             slot_req[s] = None
             slots.release(s)
 
+    def left(rid: int) -> int:
+        return requests[rid].max_new_tokens - len(outs.get(rid, []))
+
+    def fits_padded(rids: list[int]) -> bool:
+        """Every row of a padded prefill sits at positions up to L + its remaining tokens, so
+        that must fit max_len (the RoPE table, and slot storage). A preempted request comes back
+        with a longer context, so this can fail for a batch even when each request fits alone."""
+        return max(len(context(r)) for r in rids) + max(left(r) for r in rids) <= max_len
+
     while queue or any(slots.active):
         free = slots.free_slots()
+        rids: list[int] = []
         if free and queue:                                    # admit newcomers: one padded prefill
-            rids = [queue.popleft() for _ in range(min(len(free), len(queue)))]
-            prompts = [requests[r].prompt for r in rids]
+            if not fits_padded([queue[0]]):
+                r = queue[0]
+                raise ValueError(f"request {r}: prompt {len(context(r))} + new {left(r)} "
+                                 f"exceeds slot max_len {max_len}")
+            while (queue and len(rids) < len(free) and fits_padded(rids + [queue[0]])
+                   and slots.can_admit([len(context(r)) for r in rids + [queue[0]]])):
+                rids.append(queue.popleft())
+            if not rids and not any(slots.active):
+                raise ValueError(f"request {queue[0]} does not fit in the KV cache even alone")
+        if rids:
+            prompts = [context(r) for r in rids]
             L = max(len(p) for p in prompts)
-            for r in rids:
-                if L + requests[r].max_new_tokens > max_len:
-                    raise ValueError(f"request {r}: padded prompt {L} + new "
-                                     f"{requests[r].max_new_tokens} exceeds slot max_len {max_len}")
             logits, pre, pad = prefill_padded(model, prompts, max_len=L)
             nxt = sample_next(logits, **pick)
             taken = free[:len(rids)]
@@ -201,15 +242,22 @@ def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
             now = time.perf_counter() - t0
             for s, rid, t in zip(taken, rids, toks):
                 slot_req[s] = rid
-                outs[rid] = []
+                outs.setdefault(rid, [])
                 record(s, rid, t, now)
+        for s in slots.reserve_step():                        # paged: out of blocks → preempt newest
+            queue.appendleft(slot_req[s])                     # recompute later from its context
+            slot_req[s] = None
+            stats.preemptions += 1
         if not any(slots.active):
             continue
         live = [s for s in range(n_slots) if slots.active[s]]
+        stats.peak_active = max(stats.peak_active, len(live))
         stats.decode_steps += 1
         stats.computed_rows += n_slots
         stats.useful_rows += len(live)
-        stats.kv_used_frac.append(slots.used_tokens() / slots.reserved_tokens())
+        used = slots.used_tokens()
+        stats.kv_used_frac.append(used / slots.reserved_tokens())
+        stats.kv_alloc_frac.append(used / max(1, slots.allocated_tokens()))
         with _autocast(device):
             logits, _ = model(last_tok, cache=slots)          # one token per slot
         last_tok = sample_next(logits[:, -1], **pick)
@@ -217,6 +265,7 @@ def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
         now = time.perf_counter() - t0
         for s in live:
             record(s, slot_req[s], toks[s], now)
+    stats.kv_allocated_at_end = slots.allocated_tokens()
     stats.wall_s = time.perf_counter() - t0
     stats.useful_tokens = sum(len(r.tokens) for r in results)
     return results, stats.summary(results)

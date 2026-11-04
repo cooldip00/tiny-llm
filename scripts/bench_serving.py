@@ -65,6 +65,9 @@ def main() -> None:
     ap.add_argument("--requests", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--sizes", default="8,32", help="static batch sizes = continuous slot counts")
+    ap.add_argument("--repeats", type=int, default=3, help="runs per config; the median-wall run is reported")
+    ap.add_argument("--paged", action="store_true",
+                    help="4.5: add paged-KV rows with the 8-slot cache's memory budget")
     ap.add_argument("--out", type=Path, default=Path("runs/bench/serving.json"))
     args = ap.parse_args()
     device = "cuda"
@@ -77,28 +80,43 @@ def main() -> None:
     warm = make_workload(8, args.seed + 1)                    # kernels, allocator, autotune
     run_static(model, warm, 8)
     run_continuous(model, warm, 8)
+    if args.paged:
+        run_continuous(model, warm, 8, kv="paged")
 
     print("solo reference (generate, batch 1) ...", flush=True)
     ref = solo_tokens(model, reqs, device)
 
-    rows = []
+    runs = []                                                 # (label, size, fn, kwargs)
     for size in (int(s) for s in args.sizes.split(",")):
-        for name, fn in (("static", run_static), ("continuous", run_continuous)):
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
-            results, stats = fn(model, reqs, size)
-            stats.update(engine=name, size=size,
-                         peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20,
-                         correctness=agreement([r.tokens for r in results], ref))
-            rows.append(stats)
-            c = stats["correctness"]
-            print(f"{name:>10} {size:>3} | {stats['tok_s']:7.0f} tok/s | wall {stats['wall_s']:6.2f}s | "
-                  f"lat mean {stats['latency_mean_s']:5.2f} p95 {stats['latency_p95_s']:5.2f}s | "
-                  f"ttft mean {stats['ttft_mean_s']:5.2f} p95 {stats['ttft_p95_s']:5.2f}s | "
-                  f"steps {stats['decode_steps']:5d} | rows {stats['row_util']:.0%} | "
-                  f"KV {stats['kv_reserved_mib']:5.1f} MiB used {stats['kv_used_mean']:.0%}"
-                  f"/{stats['kv_used_peak']:.0%} | VRAM {stats['peak_vram_mib']:.0f} MiB | "
-                  f"same as solo {c['identical']}/{c['of']}", flush=True)
+        runs += [("static", size, run_static, {}), ("continuous", size, run_continuous, {})]
+    if args.paged:
+        # Budget = the 8-slot cache's memory: 8 × 512 positions = 4096 tokens (64 MiB in bf16).
+        budget = 8 * model.cfg.max_seq_len
+        runs += [(f"paged/{bs}", s, run_continuous, dict(kv="paged", block_size=bs, kv_blocks=budget // bs))
+                 for s, bs in ((8, 16), (32, 16), (32, 8), (32, 32), (64, 16))]
+
+    rows = []
+    for name, size, fn, kw in runs:
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        trials = [fn(model, reqs, size, **kw) for _ in range(args.repeats)]
+        walls = [s["wall_s"] for _, s in trials]
+        results, stats = sorted(trials, key=lambda t: t[1]["wall_s"])[len(trials) // 2]  # median run
+        stats.update(engine=name, size=size, wall_all_s=walls,
+                     peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20,
+                     correctness=agreement([r.tokens for r in results], ref))
+        rows.append(stats)
+        c = stats["correctness"]
+        alloc = stats["kv_alloc_used_mean"]
+        print(f"{name:>10} {size:>3} | {stats['tok_s']:7.0f} tok/s | wall {stats['wall_s']:6.2f}s | "
+              f"lat mean {stats['latency_mean_s']:5.2f} p95 {stats['latency_p95_s']:5.2f}s | "
+              f"ttft mean {stats['ttft_mean_s']:5.2f} p95 {stats['ttft_p95_s']:5.2f}s | "
+              f"steps {stats['decode_steps']:5d} | rows {stats['row_util']:.0%} | "
+              f"KV {stats['kv_reserved_mib']:5.1f} MiB used {stats['kv_used_mean']:.0%}"
+              f"/{stats['kv_used_peak']:.0%} | of claimed {'-' if alloc is None else f'{alloc:.0%}'} | "
+              f"active {stats['peak_active']} | preempt {stats['preemptions']} | "
+              f"VRAM {stats['peak_vram_mib']:.0f} MiB | "
+              f"same as solo {c['identical']}/{c['of']}", flush=True)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"workload": {"requests": len(reqs), "seed": args.seed},
                                     "rows": rows}, indent=2))

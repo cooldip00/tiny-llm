@@ -73,6 +73,8 @@ With GQA and 2 KV heads it's 2 MiB. Hence GQA/MLA matter for long context and la
 | 4.4 static batch | 8 | mixed¹ | 391 | 9,870 (mean, incl. queueing) | 357 MiB | 64-request mixed workload (see below); 32 rows: 1,281 tok/s |
 | 4.4 continuous | 8 slots | mixed | 525 | 6,090 (mean, incl. queueing) | 319 MiB | **1.34×** static at 8, 1.12× at 32 (1,434 tok/s); p95 latency −33% / −27% |
 
+| 4.5 paged KV (block 16) | 32 slots | mixed | 924 (vs 633 for 8 slots, same run) | 2,580 (mean, incl. queueing) | 458 MiB | **same 64 MiB of KV** as 8 slots: **1.46×**, 25 sequences at once instead of 8; 97% of claimed KV holds real tokens (vs 52%) |
+
 ¹ The row was planned as "8 × 128". It was measured on the mixed 64-request workload instead, because equal prompt and output lengths are exactly the case where static and continuous batching do the same work.
 | 4.6 INT8 | 1 | 128 | | | | val loss Δ: |
 | 4.7 speculative (k=4) | 1 | 128 | | | | accept rate: |
@@ -148,6 +150,43 @@ Reading:
 - **Correctness:**
   - fp32 (CPU tests): both engines give **identical** greedy tokens to each request's solo `generate()`. This covers batch sizes 1/3/8, slot counts 1/3/10 (including more slots than requests), EOS freeing a slot mid-run, and sequences joining a running slot batch at different times (per-step logits checked against the full forward). See `tests/test_engine.py`, 12 tests.
   - bf16 (GPU): 39–43 of 64 requests are token-identical to solo, depending on the engine. At every divergence, the fp32 top-1/top-2 logit gap of the solo prefix is ≤ 0.076, while the median gap over all generated positions is 1.84 and only 3.9% of positions are below 0.125. So every divergence is a near-tie flipped by bf16 rounding (batched GEMMs pick different kernels than B=1), the same effect as in 4.3. With ~140 tokens per request, a flip somewhere in about a third of requests is expected.
+- **Rerun note (added in 4.5):** the 4.5 benchmark reran these four rows with 5 repeats each (median run reported, spread < 5%). Absolute tok/s came out 15–20% higher than the first run, on the same code, because machine state differs between sessions. The ratios are what transfer: continuous/static was **1.37×** at 8 (633 vs 461 tok/s), but only **1.05×** at 32 (1,785 vs 1,702) instead of 1.12×. So the 32-slot gain is close to session noise; the latency gains (p95 −16%, mean TTFT −46%) are the more robust result there.
+
+### 4.5 Paged KV cache (2026-11-04)
+`scripts/bench_serving.py --paged --repeats 5`: the same 64-request workload, with the median of 5 runs. Raw numbers: `runs/bench/paged.json`. Code: `src/tinyllm/paged_kv.py` (`BlockAllocator`, `PagedKVCache`), `engine.run_continuous(kv="paged")`.
+
+Design (vLLM-style; the analogy is virtual memory):
+- **Pool and blocks.** One pool per layer, `[n_blocks, kv_heads, block_size, head_dim]`. A **block table** per sequence maps logical block j to a physical block (the page table). Token t lives at `(table[t // bs], t % bs)`, and all layers share one table.
+- **Allocation.** Blocks come from a free list as a sequence grows: one more block each time it crosses a block boundary. Every block has the same size, so a freed block fits any sequence. There is no external fragmentation; at most `bs − 1` positions per sequence are wasted, in its last, partly filled block.
+- **Padding is not stored.** Only real tokens go into blocks. The prefill's left-pad count becomes a RoPE offset, so positions (and outputs) stay identical.
+- **Admission and preemption.** A request is admitted if the free blocks cover its context plus one token. When a decode step needs more blocks than are free, the **newest** sequence is preempted: its blocks are freed, and it goes back to the front of the queue as prompt + tokens so far, to be recomputed (vLLM's default recompute policy). Greedy recompute reproduces the same tokens (tested).
+- **Reads.** Attention gathers each sequence's blocks into a contiguous view, then calls SDPA. vLLM's PagedAttention kernel reads blocks in place; the gather is this toy's extra copy.
+
+Workload (all rows): the same 64 requests, 9,004 tokens to generate. The **KV budget for the paged rows = the 8-slot cache's memory**: 4,096 token positions, 64 MiB in bf16.
+
+| Engine | Slots | Block | KV (MiB) | Useful tok/s | Wall median (s) [5 runs] | Latency mean / p95 (s) | Peak active | Preemptions | Pool used mean / peak | Claimed KV holding tokens | Row util |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| slots (4.4) | 8 | — | 64 | 633 | 14.23 [14.1–14.4] | 6.61 / 12.24 | 8 | 0 | 41% / 59% | 52% | 86% |
+| paged | 8 | 16 | 64 | 592 | 15.20 [15.0–15.4] | 7.07 / 13.07 | 8 | 0 | 41% / 59% | **97%** | 86% |
+| paged | 32 | 16 | 64 | **924** | 9.75 [9.4–10.5] | 4.73 / 8.54 | **25** | 42 | **76% / 98%** | 97% | 40% |
+| paged | 32 | 8 | 64 | **975** | 9.23 [9.1–9.9] | 4.26 / 7.98 | 26 | 48 | 78% / 99% | 99% | 41% |
+| paged | 32 | 32 | 64 | 803 | 11.22 [8.8–14.6]² | 4.95 / 9.66 | 25 | 40 | 74% / 96% | 94% | 38% |
+| paged | 64 | 16 | 64 | 745 | 12.08 [10.6–20.9]² | 6.11 / 10.78 | 25 | 42 | 76% / 98% | 97% | 20% |
+| slots (4.4) | 32 | — | 256 | 1,785 | 5.04 [5.0–5.5] | 2.41 / 4.33 | 32 | 0 | 31% / 52% | 57% | 64% |
+
+² Large spread, not explained yet. An isolated rerun of block 32 gave 9.7–10.5 s at a steady 1,875 MHz SM clock, so the slow runs look like interference from the host. These decode steps are CPU-bound (GPU utilisation 28–51%), so they are sensitive to other load on the machine. Treat those two medians as rough.
+
+Reading:
+- **Same memory, 1.46× the throughput.** In the 64 MiB that holds 8 contiguous slots, paging fits **25** sequences at once (block 16). Most requests need far fewer than 512 positions, and a paged sequence holds only the blocks it has filled. The pool goes from 41% to 76% used on average (98% at peak), and claimed KV holding real tokens goes from 52% to 97%. With block 8 the gain is 1.54×.
+- **The gather costs ~7%.** At equal concurrency (8 slots, no memory pressure), paged runs at 592 vs 633 tok/s: 11.7 vs 11.0 ms per decode step. That copy is what a PagedAttention kernel removes (PARKING_LOT).
+- **Block size.** Smaller blocks waste less of the last block per sequence: 99% / 97% / 94% of claimed KV holds tokens for blocks 8 / 16 / 32. They fit slightly more sequences (26 vs 25) and ran a little faster here. The cost is more blocks to gather and a larger table. vLLM's default is 16. Here 8 and 16 are within noise of each other, and 32 is worse.
+- **The budget, not the slot count, is now the limit.** 64 slots run no more sequences than 32 (still 25 active); the extra slots only add empty decode rows (row util 20%), so the run is slower. In the 32-slot rows, empty rows also hold row util at ~40%. Decoding only active rows would recover this (PARKING_LOT).
+- **Preemption is the price of admitting optimistically.** 42 recomputes per 64 requests (block 16). Sequences are admitted while they are short, then grow until the pool is full, and the newest are evicted and re-prefilled later. vLLM uses the same recompute policy with a free-block watermark; a watermark or reserve-on-admit would trade some concurrency for fewer recomputes (PARKING_LOT).
+- **Versus 4× the memory.** 32 contiguous slots with 256 MiB run at 1,785 tok/s. Paged with a quarter of that memory reaches 52–55% of it, held back by the preemptions and empty rows above, not by memory.
+- **Bug found by the benchmark:** a preempted request returns with a longer context (prompt + tokens so far). Batched into one padded prefill with a fresh request that still had many tokens to go, the padded length + remaining tokens passed the 512-position RoPE table. Admission now stops adding requests to a prefill batch once `max(context) + max(remaining) > max_len` (regression test `test_requests_that_only_fit_alone_are_not_batched`).
+- **Correctness:**
+  - fp32 (CPU tests, `tests/test_paged_kv.py`, 12 tests): allocator alloc/free/reuse, and double free raises. Paged decode logits equal the full forward with a padded joint prefill, a late joiner and block boundaries crossed. `run_continuous(kv="paged")` is identical to solo `generate()` for slots 1/3/10 and blocks 4/8/16, including a tiny budget that forces preemption. No blocks are leaked at the end.
+  - bf16 (GPU): 38–49 of 64 requests are identical to solo. On the block-16, 32-slot run (42 preemptions), every divergence is a near-tie (fp32 top-2 gap ≤ 0.076, against a median of 1.84), as in 4.3 and 4.4.
 
 ## Results: TinyLlama 1.1B (fill in)
 | Step | Batch | Prompt | Decode tok/s | % of ceiling | TTFT (ms) | Peak VRAM | Notes |

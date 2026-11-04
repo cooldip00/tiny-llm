@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.5 Toy paged KV-cache allocator (4.1–4.4 done; order per D-022: 4.5 → 4.6 → 4.9)
-- **Next action:** block allocator (fixed-size KV blocks, free list, per-sequence block table) behind the same cache protocol as `SlotKVCache`; run `run_continuous` on it with identical outputs; measure reserved vs used KV memory and the max concurrent sequences for a fixed KV budget (4.4 baseline: 31–41% of reserved KV used)
+- **Step:** 4.6 INT8 weight quantization (4.1–4.5 done; order per D-022: 4.6 → 4.9a–d → README + public)
+- **Next action:** per-channel symmetric INT8 for the Linear weights (dequantize in the matmul), then val loss Δ vs bf16 and decode tok/s at B=1 / B=32
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d
 - **Blockers:** none
 - **Open decisions:** none
@@ -18,6 +18,22 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-04 — Step 4.5 paged KV cache
+- `src/tinyllm/paged_kv.py`:
+  - `BlockAllocator`: free list; double free raises.
+  - `PagedKVCache`: per-layer block pools and a shared block table. Blocks are allocated on demand; pad tokens are not stored (the pad count becomes a RoPE offset). Reads gather the blocks into a contiguous view, then call SDPA.
+  - Preemption of the newest sequence when blocks run out, with recompute (as in vLLM).
+- `run_continuous(kv="paged", block_size, kv_blocks)`. `SlotKVCache` gets the same `can_admit` / `reserve_step` / `allocated_tokens` hooks.
+- Benchmark (5 repeats, median), with the same 64 MiB of KV as 8 slots:
+  - paged runs **25** sequences at once: **1.46×** the throughput at block 16 (924 vs 633 tok/s) and 1.54× at block 8.
+  - Pool used 41% → 76%; claimed KV holding tokens 52% → 97%.
+  - Gather cost at equal concurrency: −7%.
+  - 42 preemptions; 64 slots don't help (budget-bound).
+- Bug found by the benchmark: a preempted request (longer context), padded together with a long-remaining fresh one, overflowed the 512-position RoPE table. Admission now checks the padded batch; regression test added.
+- Benchmark variance: absolute tok/s moved 15–20% between sessions, and two paged rows had a large spread (host interference, CPU-bound steps). Now `--repeats` with a median. The 4.4 rerun gives 1.37× at 8 slots and only 1.05× at 32, noted in INFERENCE.md.
+- Suite: **150 passed**. PARKING_LOT: paged-attention kernel, active-row compaction, admission watermark, prefix caching.
+- Next: 4.6 INT8.
 
 ### 2026-11-04 — Step 4.4 static and continuous batching
 - D-022 accepted: 4.4 + 4.5 before 4.6, dates unchanged.
