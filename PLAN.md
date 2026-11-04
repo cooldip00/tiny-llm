@@ -75,7 +75,18 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [x] 4.5 Toy paged KV-cache allocator (vLLM-style blocks). With the same 64 MiB of KV as 8 contiguous slots, it runs 25 sequences at once and 1.46× the throughput; 97% of claimed KV holds tokens (vs 52%). The gather costs ~7%. See docs/INFERENCE.md
 - [x] 4.6 INT8 weight-only quantization: speed and quality (val loss) delta. Val loss Δ +0.0001 and matmul weights −50%, but decode is 0.78× at B=1: three PyTorch ops per Linear on an overhead-bound model. Rerun on TinyLlama in 4.9d; a fused kernel is 4.10b. See docs/INFERENCE.md
 - [ ] 4.7 Speculative decoding: ~14M model drafts for the ~30M model, measure acceptance rate and speedup
+  - **Revised by D-024:** prompt-lookup (n-gram) drafting instead of a ~14M draft model. Drafting costs ~0, and the target verifies k tokens per forward. Measure the acceptance rate and speedup on our model and on TinyLlama. Still optional.
 - [ ] 4.8 Export to HF Llama format, then compare against vLLM and llama.cpp (GGUF)
+  - **Revised by D-024:**
+    - [ ] 4.8a TinyLlama in our engine vs vLLM vs llama.cpp (GGUF): same prompts and lengths, each as a % of the bandwidth ceiling. Install spike for both (vLLM in a separate venv) during the 4.9 days.
+    - [ ] 4.8b Export our 30M model to HF Llama format; done when HF logits match ours. GGUF conversion is a stretch (custom tokenizer).
+- [ ] 4.11 Decode-step overhead (D-024): CUDA graphs or `torch.compile(mode="reduce-overhead")` on the KV-cached decode step. Profile one step before and after with `torch.profiler`. Done when outputs equal eager, and ms/step and tok/s are measured at B = 1 / 8 / 32. **Order: after 4.9c, before 4.9d.** Fixed-shape `generate()` first; bucketed shapes for the continuous / paged engines are a stretch.
+- [ ] 4.12 Benchmark provenance (D-025): every `runs/bench/*.json` records the git commit (and whether the tree is dirty), torch/CUDA versions, the weight dtype, and the GPU's SM clock / temperature / power / utilisation (`nvidia-smi`) plus the host CPU load, sampled before and after the timed runs. **Do first, before 4.9.**
+- [ ] 4.13 OpenAI-compatible HTTP server (D-025):
+  - Turn `run_continuous` into an engine object with `add_request()` / `step()`, so requests can arrive while others decode.
+  - `POST /v1/completions` takes token ids or text, with optional streaming.
+  - Load generator: Poisson arrivals, reporting TTFT, inter-token latency and throughput. It is also the client for 4.8a (vLLM serves the same API).
+  - Done when served outputs equal `generate()` for greedy requests, and the load test runs against both our server and vLLM. **v1, before 4.8a.**
 
 ### Track B — Real-scale inference (D-015, D-016)
 - [ ] 4.9 TinyLlama 1.1B in our engine
@@ -123,6 +134,9 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
   - [ ] 6.5g Direct outreach: send the repo to engineers at companies building inference products
 - [ ] 6.6 Self-check before sharing (added by D-021): explain every file out loud without notes, e.g. why the KV cache helps, why decode is memory-bandwidth bound, how the paged allocator handles fragmentation, why tied embeddings, the 6N + 12LdT FLOPs formula, why compile helped. Anything that can't be defended stays off the resume.
 
+- [ ] 6.7 CI (D-025): GitHub Actions runs the CPU test suite on every push, with a status badge in the README. **Before 6.5a (v1-preview).**
+- [ ] 6.8 One command regenerates every results table (D-025): `scripts/bench_all.py` runs each benchmark script and writes the INFERENCE.md tables from `runs/bench/*.json`, so the README numbers can be reproduced from the repo. Part of 6.1, v1.
+
 **Done when (6.5–6.6):** the repo is public with results, at least one post is live, and every resume bullet is backed by a number in PROGRESS.md.
 
 ---
@@ -168,6 +182,18 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-07 → 11-08 | 4.6 INT8; 4.9a–b (`gqa`, load TinyLlama weights and tokenizer) |
 | 2026-11-09 → 11-11 | 4.9c–d (logits match HF, benchmarks vs the bandwidth ceiling); first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
 | 2026-11-12 → 11-18 | 4.8 vLLM / llama.cpp comparison; rest of Phase 6 (6.1–6.3, 6.5, 6.6) → **v1** |
+
+### Revised timeline (D-024 + D-025, 2026-11-04)
+4.4–4.6 were done on 2026-11-04, 2–3 days ahead. The tables above stay as history; this one replaces their order. The dates are unchanged.
+
+| Block | Steps |
+|---|---|
+| 2026-11-04 → 11-05 | 4.12 benchmark provenance; 4.9a `gqa`; 4.9b load TinyLlama; 4.9c logits match HF |
+| 2026-11-06 → 11-08 | 4.11 CUDA graphs on decode; 4.9d TinyLlama benchmarks vs the ceiling; vLLM + llama.cpp install spike |
+| 2026-11-09 → 11-11 | 6.7 CI; first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
+| 2026-11-12 → 11-18 | 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; rest of Phase 6 → **v1** |
+| If ahead | 4.7 prompt-lookup decoding, 4.10 Triton |
+| After v1 | Phase 5, Phase 7 |
 | If ahead | 4.7, 4.10 |
 | After v1 | Phase 5, Phase 7 |
 

@@ -2,12 +2,12 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.9a `gqa` attention (4.1–4.6 done; order per D-022: 4.9a–d → README + public)
+- **Step:** 4.12 benchmark provenance, then 4.9a `gqa` attention (4.1–4.6 done; order per D-024/D-025: 4.12 → 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → CI + README + public)
 - **Next action:** `gqa` attention with `n_kv_heads < n_heads` (K/V heads shared across query groups), registered as a layer type next to `mha`; it must equal `mha` when `n_kv_heads == n_heads`, and work with `KVCache` / `SlotKVCache` / `PagedKVCache` (cache shapes use `n_kv_heads`)
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
-- **Order (D-022):** 4.4 + 4.5 moved before 4.6 (4.1–4.3 finished a day early). Dates unchanged. Checkpoint 2026-11-09: if 4.9 hasn't started, cut scope instead of moving v1-preview.
+- **Order (D-022):** 4.4 + 4.5 moved before 4.6 (4.1–4.3 finished a day early). Dates unchanged. Checkpoint 2026-11-09: if 4.9 hasn't started, cut scope instead of moving v1-preview. **D-024:** 4.9a → 4.9b → 4.9c → 4.11 (CUDA graphs) → 4.9d → README + public.
 - **Scope (D-021):** **v1-preview** by about 2026-11-11 (4.1 → 4.2 → 4.3 → 4.6 → 4.9a–d, first README, public repo); **v1** by about 2026-11-18 (4.4 + 4.5 → 4.8, rest of Phase 6). 4.7 and 4.10 only if ahead. Phase 5 and Phase 7 deferred.
 - **Daily:** ~30 min explaining the day's work out loud (feeds 6.6).
 - **Housekeeping:** push the repo to a public GitHub repo (no remote is set up yet; 20 commits so far). _Done 2026-11-04: pushed to github.com/cooldip00/tiny-llm, private for now; make it public at v1-preview (6.5a)._
@@ -31,6 +31,19 @@ Newest first. One entry per work block: what was done, numbers, next.
 - Suite: **166 passed** (16 new in `tests/test_quant.py`).
 - Also fixed the INFERENCE results table: the 4.4 footnote and the 4.5 row had split it in two.
 - Next: 4.9a `gqa`.
+- D-023 accepted (after the 4.6 commit): from 4.9 on, inference stores weights in bf16; training is unchanged. Earlier numbers stay labelled fp32 + autocast.
+- D-024 accepted:
+  - new step 4.11 (CUDA graphs on the decode step, profiled), placed between 4.9c and 4.9d;
+  - 4.7 becomes prompt-lookup decoding;
+  - 4.8 compares on TinyLlama first, with the 30M export as 4.8b.
+  - Dates unchanged. New order: 4.9a → 4.9b → 4.9c → 4.11 → 4.9d → README + public.
+- D-025 accepted:
+  - 4.12 benchmark provenance (first, before 4.9);
+  - 4.13 OpenAI-compatible server + load generator (v1, before 4.8a);
+  - 6.7 CI (before going public);
+  - 6.8 one-command results tables (v1).
+  - Revised timeline table in PLAN.md; dates unchanged.
+- Fixed the parking-lot test `test_initial_loss_near_uniform`: seeded, and its target corrected to ln V + σ²/2 = 9.088 (it was ln V; measured 9.088 ± 0.026 over 20 seeds). Suite: 166 passed.
 
 ### 2026-11-04 — Step 4.5 paged KV cache
 - `src/tinyllm/paged_kv.py`:

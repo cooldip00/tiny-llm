@@ -159,3 +159,82 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **Risk:** the TinyLlama work (4.9), which carries the bandwidth-ceiling story, moves later.
 - **Revisit on 2026-11-09:** if 4.9 hasn't started by then, cut scope rather than move the date: e.g. ship v1-preview without 4.9 and add it in v1 (new entry required).
 - **Rejected:** keeping D-021's order unchanged (fine too, but it leaves the batching work cold for a week).
+
+### D-023 — Inference stores weights in bf16 · ACCEPTED (2026-11-04)
+- **Context:** 4.1–4.6 ran inference with the training layout: fp32 weights under bf16 autocast, so every matmul re-casts its weight on every step. 4.6 measured weights stored in bf16 at **1.28× / 1.20× / 1.31×** decode tok/s (B = 1 / 8 / 32), with val loss 1.2825 → 1.2826 and argmax agreement with plain fp32 unchanged (99.34%). TinyLlama (4.9) is 1.1B params: 4.4 GB in fp32 would not leave room on the 8 GB GPU, but 2.2 GB in bf16 does.
+- **Choice:**
+  - From 4.9 on, inference loads weights in bf16 (`model.to(torch.bfloat16)` after loading), still under bf16 autocast. This covers our checkpoints and TinyLlama.
+  - INT8 (4.6) stays an option on top. It quantizes from the loaded weights, and its non-matmul parts follow the model dtype.
+  - Training is unchanged: fp32 master weights + bf16 autocast (D-019's "Other" line).
+- **Consequence:**
+  - The 4.1–4.6 numbers stay as recorded, labelled "fp32 + autocast". New tables state the weight dtype.
+  - Where a later step compares against an earlier row, it reruns that row in bf16 rather than mixing layouts.
+  - Correctness references stay fp32 (CPU tests, and the plain-fp32 comparisons in 4.6 / 4.9c).
+- **Why:** it is free speed at no quality cost. It halves weight memory, which 4.9 needs. And it is the fair baseline for INT8 and for vLLM / llama.cpp (4.8), which serve bf16/fp16 weights.
+- **Rejected:**
+  - Keeping fp32 + autocast: slower, and it doesn't fit TinyLlama.
+  - Re-measuring 4.1–4.5 now: costs time before v1-preview, and their within-run ratios still hold.
+  - fp16: bf16 matches training and needs no loss scaling or overflow care.
+
+### D-024 — Add a decode-overhead step; redesign 4.7; TinyLlama first in 4.8 · ACCEPTED (2026-11-04). Supersedes the 4.7 and 4.8 wording in PLAN only
+- **Context:** 4.1–4.6 are done on 2026-11-04, 2–3 days ahead. Two things measured along the way change what the remaining steps can show:
+  - Decode is overhead-bound. A step takes ~9.5 ms at any batch size, while weight reads are ~1.5% of that (4.1, 4.6).
+  - INT8 and bf16 storage change speed only through op count, not through bytes (4.6).
+- **Choice:**
+  1. **New step 4.11: decode-step overhead.** CUDA graphs (or `torch.compile(mode="reduce-overhead")`) on the KV-cached decode step.
+     - Profile one step with `torch.profiler` before and after, to back the "overhead-bound" claim with a trace.
+     - Done when outputs are identical to eager, and ms/step and tok/s are measured on our model (B = 1 / 8 / 32).
+     - Order: after 4.9c (TinyLlama logits match) and before 4.9d (TinyLlama benchmarks). Otherwise 4.9d mostly measures Python overhead: TinyLlama has 22 layers, which means an estimated ~25 ms/step eager against a ~5.2 ms bandwidth floor.
+     - Scope: the fixed-shape decode step of `generate()` (B = 1 and static batch) first. The continuous / paged engines change shapes per step; padding them to fixed buckets is a stretch goal.
+  2. **4.7 becomes prompt-lookup (n-gram) speculative decoding.**
+     - Draft tokens come from matching the last n tokens against earlier context, so drafting costs ~0. The target verifies k drafted tokens in one forward.
+     - Measure the acceptance rate and the speedup on our model and on TinyLlama.
+     - It stays optional (D-021).
+  3. **4.8: TinyLlama first.**
+     - The main comparison is TinyLlama 1.1B in our engine vs vLLM vs llama.cpp (GGUF), with the same prompts and lengths, against the bandwidth ceiling. TinyLlama is already in HF format, so no export is needed.
+     - Exporting our 30M model to HF Llama format becomes a sub-step (4.8b). Done when HF's logits match ours. Converting it to GGUF is a stretch goal: llama.cpp's converter may reject our custom BPE tokenizer.
+     - A one-hour install spike for vLLM (separate venv, its own torch) and llama.cpp runs early, during the 4.9 days, so environment problems surface before v1 week.
+- **Dates:** unchanged. v1-preview ~2026-11-11, v1 ~2026-11-18. The 2026-11-09 checkpoint (D-022) still applies. 4.11 is on the v1-preview path, so being ahead pays for it.
+- **Why:**
+  - Speculative decoding with the planned ~14M draft would likely be *slower* here. With both models overhead-bound, a draft step costs ~0.75 of a target step: at k = 4 and 80% acceptance, that's ~3.4 tokens per ~4 target-steps of time, ~0.85×. A ~14M draft would also have to be trained first.
+  - Comparing against vLLM on the 30M model mostly measures vLLM's CUDA graphs against our Python overhead. TinyLlama is bandwidth-bound, with public reference numbers.
+  - 4.11 is what makes the 4.9d "% of bandwidth ceiling" headline meaningful.
+- **Rejected:**
+  - Keeping 4.7 as written: it needs a new trained model and would likely measure a slowdown.
+  - Training a draft model for TinyLlama: it needs TinyLlama's tokenizer, and the training cost is out of scope.
+  - Comparing only the 30M model in 4.8: an overhead comparison, not an engine comparison.
+  - Moving the dates earlier: keep the lead as a buffer for 4.9, the riskiest step left.
+
+### D-025 — Add benchmark provenance, an HTTP server, CI, and one-command tables · ACCEPTED (2026-11-04)
+- **Context:** we are 2–3 days ahead (D-024). The 4.5 benchmark showed 15–20% run-to-run noise that we could explain only after the fact. The 4.8 comparison needs a like-for-like serving setup, and the repo goes public at v1-preview.
+- **Choice:** four additions, placed by when they pay off:
+  1. **4.12 Benchmark provenance:** the commit, versions, weight dtype, GPU clocks / temperature / power / utilisation, and host load, stored in every `runs/bench/*.json`. Done first, before 4.9.
+  2. **4.13 OpenAI-compatible HTTP server** on the continuous-batching engine, with requests arriving while others decode, plus a Poisson-arrival load generator. In v1, before 4.8a, so ours and vLLM are measured with one client and one API.
+     - Web layer: FastAPI + uvicorn, or the standard library. The "no high-level frameworks" rule (CLAUDE.md) covers model, training and engine code, which stay ours. An HTTP layer is plumbing.
+  3. **6.7 CI:** GitHub Actions runs the CPU test suite, before the repo goes public.
+  4. **6.8 One command regenerates the results tables** from `runs/bench/*.json`, in v1, as part of 6.1.
+- **Dates:** unchanged (v1-preview ~11-11, v1 ~11-18). The 11-09 checkpoint still applies. Cut order if late: 6.8 first, then 4.13 (4.8a then falls back to offline single-stream and batch benchmarks); never cut 4.12 or 6.7.
+- **Why:**
+  - Provenance makes every later number defensible.
+  - The server turns 4.8 from a speed race into a serving comparison, and makes the repo usable.
+  - CI and reproducible tables are cheap credibility for a public repo.
+- **Rejected:**
+  - Writing our own load generator only for vLLM: one client for both engines is the point.
+  - gRPC or custom protocols: the OpenAI API is what vLLM and every client speak.
+  - Running CI on GPU: no free GPU runners. The CPU tests cover correctness; GPU numbers come from the benchmark JSONs.
+
+### D-023 — Inference stores weights in bf16 · ACCEPTED (2026-11-04)
+- **Context:** 4.1–4.6 ran inference with the training layout: fp32 weights under bf16 autocast, so every matmul re-casts its weight on every step. 4.6 measured weights stored in bf16 at **1.28× / 1.20× / 1.31×** decode tok/s (B = 1 / 8 / 32), with val loss 1.2825 → 1.2826 and argmax agreement with plain fp32 unchanged (99.34%). TinyLlama (4.9) is 1.1B params: 4.4 GB in fp32 would not leave room on the 8 GB GPU, but 2.2 GB in bf16 does.
+- **Choice:**
+  - From 4.9 on, inference loads weights in bf16 (`model.to(torch.bfloat16)` after loading), still under bf16 autocast. This covers our checkpoints and TinyLlama.
+  - INT8 (4.6) stays an option on top. It quantizes from the loaded weights, and its non-matmul parts follow the model dtype.
+  - Training is unchanged: fp32 master weights + bf16 autocast (the training "Other" choices above).
+- **Consequence:**
+  - The 4.1–4.6 numbers stay as recorded, labelled "fp32 + autocast". New tables state the weight dtype.
+  - Where a later step compares against an earlier row, it reruns that row in bf16 rather than mixing layouts.
+  - Correctness references stay fp32 (CPU tests, and the plain-fp32 comparisons in 4.6 / 4.9c).
+- **Why:** it is free speed at no quality cost. It halves weight memory, which 4.9 needs. And it is the fair baseline for INT8 and for vLLM / llama.cpp (4.8), which serve bf16/fp16 weights.
+- **Rejected:**
+  - Keeping fp32 + autocast: slower, and it doesn't fit TinyLlama.
+  - Re-measuring 4.1–4.5 now: costs time before v1-preview, and their within-run ratios still hold.
+  - fp16: bf16 matches training and needs no loss scaling or overflow care.

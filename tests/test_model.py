@@ -103,12 +103,19 @@ def test_exact_preset_sizes():
     assert Transformer(get_config("main")).num_params() == 29_893_120
 
 
-def test_initial_loss_near_uniform(model):
-    # A well-initialised model is almost uniform over the vocab: loss ≈ ln(V) = 9.01.
-    idx = torch.randint(0, CFG.vocab_size, (4, 64))
+def test_initial_loss_near_uniform():
+    # A well-initialised model is almost uniform over the vocab: loss ≈ ln(V) = 9.01, plus a small
+    # excess from the spread of the initial logits. A logit is RMSNorm(h) (|.|² ≈ d) · an embedding
+    # row (std init_std), so its std is σ = init_std·√d (0.39 here), and E[loss] ≈ ln V + σ²/2 = 9.09.
+    # Measured over 20 seeds: mean 9.088, std 0.026. Seeded, so it no longer depends on test order.
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        m = Transformer(CFG).eval()
+    idx = torch.randint(0, CFG.vocab_size, (4, 64), generator=torch.Generator().manual_seed(0))
     with torch.no_grad():
-        _, loss = model(idx[:, :-1], targets=idx[:, 1:])
-    assert loss.item() == pytest.approx(math.log(CFG.vocab_size), abs=0.1)
+        _, loss = m(idx[:, :-1], targets=idx[:, 1:])
+    sigma = CFG.init_std * math.sqrt(CFG.d_model)
+    assert loss.item() == pytest.approx(math.log(CFG.vocab_size) + sigma**2 / 2, abs=0.08)  # ~3 std
 
 
 def test_every_parameter_gets_a_gradient():
