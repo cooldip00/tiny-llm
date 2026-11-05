@@ -53,3 +53,14 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
 - [2026-11-04] **`torch.compile(mode="reduce-overhead")` vs manual graphs** (4.11 comparison). After 4.11 the 30M step is GPU-bound across ~430 small kernels (2.5–4 µs each). Fusion (compile, or Triton in 4.10) is the next lever. Also check: graph replay costs 0.35–1.4 ms of host time on WSL, growing with node count. Is that WSL-specific?
 - [2026-11-04] **Slot KV caches sized by `max_seq_len`** (4.9d). On TinyLlama each slot reserves 2,048 positions, so only 8–10% of the continuous engine's KV holds tokens (1.4 GiB at 32 slots). Cap slots at the workload's max prompt + new tokens, or use the paged cache by default for TinyLlama.
 - [2026-11-04] **Eager `KVCache` memory at B=32 on TinyLlama** (4.9d). Reserved memory grows to 4.6–5.7 GiB against 3.8–4.6 GiB allocated, and decode varies ±20% run to run. Check fragmentation (`expandable_segments`), or allocate the cache once per batch shape.
+- [2026-11-05] **README polish for v1** (6.1 / 6.5a; the first README at v1-preview only has the text, the results table and two Mermaid diagrams). Add:
+  1. Plots in `docs/img/`, generated from `runs/bench/*.json` by 6.8's `bench_all.py`:
+     - tok/s against the bandwidth ceiling by engine (B=1)
+     - throughput vs batch size
+     - the training val-loss curve
+  2. A short demo GIF of streaming generation (TinyLlama, KV + graphs).
+  3. A link to the HF Space once 6.5b is up.
+  4. A link to the blog post (6.5d).
+  5. A GitHub social preview image (Settings → Social preview).
+  6. A "What I learned / design decisions" section linking the key D-xxx entries.
+  7. Plain-language explainers for non-specialists: what a KV cache is and why decode is memory-bound.

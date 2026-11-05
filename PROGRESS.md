@@ -2,9 +2,9 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 6.7 CI (4.1–4.6, 4.12, 4.9a–d and 4.11 done; order per D-024/D-025: 4.9d → 6.7 CI → first README → public = v1-preview around 2026-11-11)
-- **Next action:** GitHub Actions workflow running the CPU test suite (GPU tests skip without CUDA) on every push, plus a status badge for the README (D-025).
-- _Previous step 4.9d (TinyLlama benchmarks against the bandwidth ceiling): done 2026-11-04, see the log._
+- **Step:** 6.5a repo public = **v1-preview** (4.1–4.6, 4.12, 4.9a–d, 4.11, 6.7 CI and the first README done; order per D-024/D-025)
+- **Next action:** check the README renders on GitHub (badge, Mermaid diagrams, tables). Then the user makes the repo public, pins it on the profile, and fills in the About box (description + topics). Then 4.8.
+- _Previous steps 6.7 CI and the first README: done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
@@ -19,6 +19,32 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-05 — First README (6.1 draft) + MIT license
+- `README.md` is results first, for the 30-second reader (6.5a):
+  - CI badge and 4 highlight bullets.
+  - Results tables: TinyLlama decode against the ceiling, serving, training.
+  - Two Mermaid diagrams: the model block and the serving request path.
+  - Repo layout, reproduce commands, roadmap.
+- Every number is checked against INFERENCE.md and this log.
+- `LICENSE`: MIT. Without a license, a public repo is "all rights reserved".
+- Left for v1, in PARKING_LOT "README polish": plots, a demo GIF, Space and blog links, a social preview image, design-decision and plain-language sections.
+- Gap: `runs/` is git-ignored, so the raw benchmark JSONs aren't in the repo. Decide in 6.8 whether to commit them.
+- 6.7 is closed by the badge.
+
+### 2026-11-05 — Step 6.7 CI
+- `.github/workflows/ci.yml`: runs on push, pull request and manual dispatch, on ubuntu-24.04 with uv and Python 3.12.
+  - It installs CPU torch 2.14.1 before the project, so the CUDA 13.0 wheels from pyproject (D-017) are never pulled.
+  - The job fails if any `nvidia-*` package is installed.
+- Expected skips (22):
+  - 18 need CUDA.
+  - 2 need `data/*.bin`.
+  - 2 need TinyLlama in the HF cache.
+- Results:
+  - Local simulation (fresh clone, empty HF cache): 199 passed, 22 skipped, no nvidia packages.
+  - GitHub: first run 43 s total (pytest 14.7 s). After the bump to `actions/checkout@v7` and `astral-sh/setup-uv@v10.3.3` (clears the Node 20 warning), 199 passed, 22 skipped in 20.4 s.
+- `gh` CLI is set up locally with a read-only fine-grained token (tiny-llm only; Actions and Contents read) to check runs.
+- Next: the first README, including the badge, closes 6.7. Then make the repo public (v1-preview).
 
 ### 2026-11-04 — Step 4.9d TinyLlama benchmarks against the bandwidth ceiling
 - `bench_generate.py`, `bench_serving.py`, `bench_quant.py` take `--model tinyllama`, which writes to `runs/bench/tinyllama/*.json`.
