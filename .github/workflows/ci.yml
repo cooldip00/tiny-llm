@@ -1,0 +1,42 @@
+# Step 6.7 (D-025): run the CPU test suite on every push.
+# No GPU runners are free, so CUDA tests skip here; GPU numbers live in runs/bench/*.json.
+# Data (data/*.bin) and TinyLlama weights (HF cache) are not in the repo; their tests skip too.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      # pyproject.toml takes torch from the CUDA 13.0 index (D-017), which pulls several GB of
+      # CUDA libraries a CPU runner can't use. Install the CPU build of the same version first;
+      # the project install then finds torch==2.14.1 already satisfied.
+      - name: Install (CPU torch)
+        run: |
+          uv venv
+          uv pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+          uv pip install -e . --group dev
+          if uv pip list | grep -qi '^nvidia-'; then echo "CUDA libraries were installed"; exit 1; fi
+          uv run --no-sync python -c "import torch; print(torch.__version__, 'cuda', torch.cuda.is_available())"
+
+      - name: Test
+        run: uv run --no-sync pytest -q -rs
