@@ -83,6 +83,11 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
     - [ ] 4.8b Export our 30M model to HF Llama format; done when HF logits match ours. GGUF conversion is a stretch (custom tokenizer).
 - [x] 4.11 Decode-step overhead (D-024): CUDA graphs or `torch.compile(mode="reduce-overhead")` on the KV-cached decode step. Profile one step before and after with `torch.profiler`. Done when outputs equal eager, and ms/step and tok/s are measured at B = 1 / 8 / 32. **Order: after 4.9c, before 4.9d.** Fixed-shape `generate()` first; bucketed shapes for the continuous / paged engines are a stretch. _Done 2026-11-04: `src/tinyllm/cuda_graph.py`, with manual CUDA graphs, a static KV cache and length buckets, enabled by `generate(cuda_graph=True)`. 30M bf16 decode is **4.9–8.1× faster** (8.0 → 0.99 ms/step at B=1). TinyLlama B=1 went from 38–48 to 124–133 tok/s (65–69% of the ceiling). Eager was host-bound, with the GPU idle 58–92% and downclocked. Replay is bit-identical to the static eager step. Against variable-shape eager, outputs match except at bf16 near-ties (margin ≤ 1 ulp): a different SDPA kernel. Continuous / paged engines not done._
 - [x] 4.12 Benchmark provenance (D-025): every `runs/bench/*.json` records the git commit (and whether the tree is dirty), torch/CUDA versions, the weight dtype, and the GPU's SM clock / temperature / power / utilisation (`nvidia-smi`) plus the host CPU load, sampled before and after the timed runs. **Do first, before 4.9.** _Done 2026-11-04: `src/tinyllm/provenance.py` (before / during / after, `nvidia-smi -lms` sampler, throttle reasons, Windows CPU %), wired into bench_generate / bench_serving (also per row) / bench_quant. First finding: B=1 decode runs at ~860 MHz SM because the GPU idles between kernels._
+- [ ] 4.11b CUDA graphs in the continuous-batching engine (D-027). **Order: before 4.13.**
+  - `SlotGraphDecoder` in `cuda_graph.py`: fixed GPU buffers for tokens, slot lengths and slot state; one graph per window bucket (shared memory pool, as in 4.11); each step replays the smallest bucket that covers the longest slot. Prefill and sampling stay eager.
+  - `run_continuous(..., cuda_graph=True)`, slot cache only. Paged KV is optional (+3–4 h) and raises "not supported" until done.
+  - `bench_serving.py --cuda-graph`: continuous eager vs continuous + graphs on TinyLlama, same 64 requests, with provenance.
+  - Done when greedy outputs equal eager up to bf16 near-ties (as in 4.11), requests joining / leaving and bucket switches mid-run are tested, the full suite passes, and the TinyLlama throughput with graphs is measured next to eager (272 tok/s at 8 slots today). Estimate ~1 day.
 - [ ] 4.13 OpenAI-compatible HTTP server (D-025):
   - Turn `run_continuous` into an engine object with `add_request()` / `step()`, so requests can arrive while others decode.
   - `POST /v1/completions` takes token ids or text, with optional streaming.
@@ -192,7 +197,7 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-04 → 11-05 | 4.12 benchmark provenance; 4.9a `gqa`; 4.9b load TinyLlama; 4.9c logits match HF |
 | 2026-11-06 → 11-08 | 4.11 CUDA graphs on decode; 4.9d TinyLlama benchmarks vs the ceiling; vLLM + llama.cpp install spike |
 | 2026-11-09 → 11-11 | 6.7 CI; first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
-| 2026-11-12 → 11-18 | 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; rest of Phase 6 → **v1** |
+| 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; rest of Phase 6 → **v1** |
 | If ahead | 4.7 prompt-lookup decoding, 4.10 Triton |
 | After v1 | Phase 5, Phase 7 |
 | If ahead | 4.7, 4.10 |

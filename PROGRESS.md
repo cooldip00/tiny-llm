@@ -2,8 +2,8 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-025: 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
-- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._
+- **Step:** 4.11b CUDA graphs in the continuous engine, starting 2026-11-06 (D-027, ~1 day), then 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-027: 4.11b → 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b).
 - _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -19,6 +19,13 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-05 — Planned 4.11b and 4.13 (D-027)
+- 4.13 plan made: an engine object with `add_request()` / `step()`, a FastAPI server with `/v1/completions` (streaming, `ignore_eos`), a Poisson load generator (httpx), and CPU tests. Estimate ~7–9 h.
+- Found that the continuous engine has no CUDA graphs: eager at ~22 ms/step, so served latency would mostly measure kernel-launch overhead, and vLLM uses graphs.
+- D-027: new step 4.11b (graphs in the continuous engine, slot cache first, ~1 day) **before** 4.13, so 4.13's first load test shows graph-speed numbers.
+- Hosting: the server runs locally in WSL for benchmarks. The public demo stays 6.5b (HF Space).
+- Next: 4.11b on 2026-11-06.
 
 ### 2026-11-05 — 4.8-spike: vLLM + llama.cpp install
 - Everything is in `~/spike/` outside the repo, each in its own venv. Model: TinyLlama @ `fe8a4ea` from the HF cache.

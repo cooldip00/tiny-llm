@@ -237,3 +237,28 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - The base 3T checkpoint: fp32 (twice the download, cast at load), and no chat behaviour for demos. Logit matching (4.9c) works the same on either.
   - Adding the `safetensors` package: works, but it's one more dependency for ~90 lines of code.
   - Unpinned `main`: the weights could change under a published number.
+
+### D-027 — CUDA graphs in the continuous engine (4.11b), before 4.13 · ACCEPTED (2026-11-05). Amends the D-025 order: 4.11b → 4.13 → 4.8a
+- **Context:**
+  - 4.11 put the decode step in CUDA graphs for fixed-shape `generate()` only: TinyLlama B=1 went from ~45 to 128 tok/s.
+  - The continuous engine is still eager and host-bound: ~22 ms/step launching kernels, 272 tok/s at 8 slots.
+  - 4.13's load test reports inter-token latency and throughput, which are set by that step time. vLLM, our 4.8a baseline, uses CUDA graphs.
+  - The slot cache is already mostly graph-friendly: a fixed batch of `n_slots` rows, with lengths and state kept on the GPU. Only the attention window (as far as the longest slot) grows each step, and 4.11's length buckets already solve that.
+- **Choice:**
+  - New step 4.11b: CUDA graphs for the continuous engine's decode step, slot cache first. Prefill and sampling stay eager.
+  - Paged KV graphs are optional (+3–4 h).
+  - Order: 4.11b → 4.13 → 4.8a. Start 2026-11-06, ~1 day.
+  - The graph runner is its own class, so 4.13's `ContinuousEngine.step()` reuses it unchanged.
+- **Why:**
+  - The 4.13 load test then shows graph-speed numbers from its first run, and isn't measured twice.
+  - The 4.8a comparison with vLLM measures the engine design, not Python kernel-launch overhead.
+  - Reuses tested 4.11 code. A measured before / after on `bench_serving`.
+  - We are 6 days ahead, so v1 (~11-18) still holds.
+- **Expected limits:**
+  - TTFT barely changes, because prefill stays eager and queueing dominates it.
+  - Some host overhead remains (scheduler, the per-step `.tolist()`).
+  - Correctness is compared with eager up to bf16 near-ties, as in 4.11.
+- **Rejected:**
+  - 4.13 first: its first load test would be eager and go stale a day later. Also, the engine refactor would not reduce the graph work.
+  - Skipping it until after v1: the vLLM serving comparison would mostly measure launch overhead.
+  - Paged graphs first: block tables add work, and the slot cache already gives the measurement.
