@@ -78,6 +78,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
   - **Revised by D-024:** prompt-lookup (n-gram) drafting instead of a ~14M draft model. Drafting costs ~0, and the target verifies k tokens per forward. Measure the acceptance rate and speedup on our model and on TinyLlama. Still optional.
 - [ ] 4.8 Export to HF Llama format, then compare against vLLM and llama.cpp (GGUF)
   - **Revised by D-024:**
+    - [x] 4.8-spike vLLM + llama.cpp install spike, outside the repo (`~/spike/`). Done when each runs TinyLlama @ `fe8a4ea` and answers one `/v1/completions` request, and the project env is unchanged (snapshot before / after: package list, `check_env.py`, full test suite). Only `cuda-toolkit-13-0` from the wsl-ubuntu repo, never a driver package. _Was only in the 11-06 → 11-08 timeline row and the 4.8a text, so it was missed when that block finished early; tracked here from 2026-11-05._ _Done 2026-11-05: vLLM 0.33.0 and llama.cpp `61d4472` both serve `/v1/completions`; env snapshot unchanged, 221 passed. Issues and first numbers in PROGRESS._
     - [ ] 4.8a TinyLlama in our engine vs vLLM vs llama.cpp (GGUF): same prompts and lengths, each as a % of the bandwidth ceiling. Install spike for both (vLLM in a separate venv) during the 4.9 days.
     - [ ] 4.8b Export our 30M model to HF Llama format; done when HF logits match ours. GGUF conversion is a stretch (custom tokenizer).
 - [x] 4.11 Decode-step overhead (D-024): CUDA graphs or `torch.compile(mode="reduce-overhead")` on the KV-cached decode step. Profile one step before and after with `torch.profiler`. Done when outputs equal eager, and ms/step and tok/s are measured at B = 1 / 8 / 32. **Order: after 4.9c, before 4.9d.** Fixed-shape `generate()` first; bucketed shapes for the continuous / paged engines are a stretch. _Done 2026-11-04: `src/tinyllm/cuda_graph.py`, with manual CUDA graphs, a static KV cache and length buckets, enabled by `generate(cuda_graph=True)`. 30M bf16 decode is **4.9–8.1× faster** (8.0 → 0.99 ms/step at B=1). TinyLlama B=1 went from 38–48 to 124–133 tok/s (65–69% of the ceiling). Eager was host-bound, with the GPU idle 58–92% and downclocked. Replay is bit-identical to the static eager step. Against variable-shape eager, outputs match except at bf16 near-ties (margin ≤ 1 ulp): a different SDPA kernel. Continuous / paged engines not done._
@@ -125,7 +126,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [ ] 6.3 3–4 resume bullets with real numbers
 - [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
 - [ ] 6.5 Publish (added by D-021), in this order:
-  - [ ] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots
+  - [ ] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1)._
   - [ ] 6.5b Hugging Face: our model with a model card, plus a small Gradio Space demo
   - [ ] 6.5c W&B project set to public; link the training curves from the README
   - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume

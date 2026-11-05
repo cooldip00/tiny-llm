@@ -2,9 +2,9 @@
 
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
-- **Step:** 6.5a repo public = **v1-preview** (4.1–4.6, 4.12, 4.9a–d, 4.11, 6.7 CI and the first README done; order per D-024/D-025)
-- **Next action:** check the README renders on GitHub (badge, Mermaid diagrams, tables). Then the user makes the repo public, pins it on the profile, and fills in the About box (description + topics). Then 4.8.
-- _Previous steps 6.7 CI and the first README: done 2026-11-05, see the log._
+- **Step:** 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-025: 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._
+- _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
 - **Open decisions:** none
@@ -19,6 +19,48 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-05 — 4.8-spike: vLLM + llama.cpp install
+- Everything is in `~/spike/` outside the repo, each in its own venv. Model: TinyLlama @ `fe8a4ea` from the HF cache.
+- **System change:** `cuda-toolkit-13-0` (nvcc 13.0.88) from NVIDIA's wsl-ubuntu apt repo, installed into `/usr/local/cuda-13.0`, plus cmake 3.28. No driver packages; libcuda is still `/usr/lib/wsl/lib`. Not on PATH, and `.bashrc` is untouched.
+- **vLLM 0.33.0:**
+  - Its venv is 8.9 GB with its own torch 2.14.0+cu130; the install took 21 min.
+  - Offline greedy decoding works, ~153 tok/s at B=1. That's rough: one run with prefill included, not comparable yet.
+  - `vllm serve` is ready in 77 s and answers `/v1/completions`. The GPU is back to 0 MiB after it stops.
+  - **Issue:** the sampler uses FlashInfer, which JIT-compiles on first use and fails with `ninja` not found, even though vLLM logs "FlashInfer kernels are disabled". Workaround: `VLLM_USE_FLASHINFER_SAMPLER=0` (greedy doesn't need it). For 4.8a, also try `vllm download-kernels` (prebuilt) and record which sampler ran.
+- **llama.cpp `61d4472`:**
+  - CUDA build for sm_86 (llama-cli/server/bench/quantize).
+  - **Issue:** CMake found the *Windows* CUDA 12.4 through the `/mnt/c` entries WSL adds to PATH. Fix for the build only: drop `/mnt/` from PATH and set `CUDAToolkit_ROOT=/usr/local/cuda-13.0`.
+  - Converter venv: 0.9 GB, pins torch 2.11 CPU and transformers 4.57.6.
+  - GGUF files: bf16 2,100 MiB, Q8_0 1,116 MiB.
+  - `llama-bench`, pp128 / tg256, all layers on GPU, 3 reps:
+
+    | GGUF | tg256 tok/s | pp128 tok/s |
+    |---|---|---|
+    | bf16 | 135 ± 6 | ~3,600 (± 2,100, noisy) |
+    | Q8_0 | 238 ± 7 | ~8,500 (± 3,600) |
+
+  - `llama-server` is ready in 4 s and answers `/v1/completions` (126 tok/s for that request).
+  - Its greedy text is word for word the same as vLLM's.
+- **First look, to verify in 4.8a under the same protocol:**
+  - At bf16, B=1, vLLM (~153) and llama.cpp (135) are close to our 128.
+  - llama.cpp Q8_0 at 238 tok/s is the bar for the fused INT8 kernel. Our INT8 path is 0.80× bf16 today.
+- **Project env unchanged** (before vs after snapshot):
+  - Same `pip list`; same hashes of `uv.lock`, `pyproject.toml`, `.bashrc` and `.profile`; same torch info.
+  - **221 passed** after the spike as before.
+  - check_env: bf16 matmul 39.3 vs 40.0 TFLOPS, copy/read 409/419 vs 409/426 GB/s (noise).
+  - Torch still loads its own pip CUDA libraries (`nvidia/cu13/lib`), not `/usr/local/cuda`.
+  - First test run after the spike: 136 s vs 84 s before; the rerun took 97 s. Likely a cold file cache after the 3 GB of GGUF files (7 GB RAM), not an env change.
+- Cleanup if wanted: `rm -rf ~/spike ~/.cache/vllm`, then `apt remove cuda-toolkit-13-0 cuda-keyring` + `apt autoremove`.
+- Next: 4.13 (D-025).
+
+### 2026-11-05 — Repo public → v1-preview
+- github.com/cooldip00/tiny-llm is public:
+  - The page loads without a login, and the CI badge shows "passing" to anonymous visitors.
+  - About box set: a description and 10 topics.
+- v1-preview was planned for about 2026-11-11, so this is 6 days early.
+- 6.5a is still open until the README plots are in (v1, PARKING_LOT "README polish").
+- Next: the vLLM + llama.cpp install spike, then 4.13 (D-025).
 
 ### 2026-11-05 — First README (6.1 draft) + MIT license
 - `README.md` is results first, for the 30-second reader (6.5a):
