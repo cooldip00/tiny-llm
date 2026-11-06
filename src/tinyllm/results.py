@@ -32,6 +32,7 @@ class Bench:
     args: tuple[str, ...]
     out: str                         # path inside the run directory
     minutes: int                     # rough, for the run plan printout
+    env: tuple[tuple[str, str], ...] = ()   # extra environment for this benchmark, recorded in the manifest
 
     @property
     def out_dir_flag(self) -> bool:  # profile_decode takes a directory, the others a file
@@ -39,8 +40,14 @@ class Bench:
 
 
 TL = ("--model", "tinyllama")
+# The naive engine runs a full forward per token, so its activations and logits grow by one position every
+# step. No cached block fits the next request, the caching allocator keeps reserving new ones until the GPU
+# is full (7,991 MiB in use for a 475 MiB peak at 30M B=32 P=128), and a cuBLAS call then fails
+# (6.8, 2026-11-06). Expandable segments let a block grow in place: 695 MiB, same speed. Only the naive
+# benchmarks need it; the other engines use fixed-size caches.
+GROWING = (("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),)
 BENCHES = [
-    Bench("30m-naive", "bench_generate.py", ("--engine", "naive", "--dtype", "bf16"), "30m/naive.json", 4),
+    Bench("30m-naive", "bench_generate.py", ("--engine", "naive", "--dtype", "bf16"), "30m/naive.json", 4, GROWING),
     Bench("30m-kv", "bench_generate.py", ("--engine", "kv", "--dtype", "bf16"), "30m/kv.json", 2),
     Bench("30m-kv-graph", "bench_generate.py", ("--engine", "kv-graph", "--dtype", "bf16"), "30m/kv-graph.json", 2),
     Bench("30m-serving", "bench_serving.py", ("--cuda-graph", "--paged"), "30m/serving.json", 12),
@@ -48,7 +55,7 @@ BENCHES = [
     Bench("30m-profile", "profile_decode.py", ("--batch", "1"), "30m/profile/decode_main_B1.json", 1),
     Bench("tl-logits", "tinyllama_vs_hf.py", (), "tinyllama/logits_vs_hf.json", 4),
     Bench("tl-hf", "bench_generate.py", (*TL, "--engine", "hf"), "tinyllama/hf.json", 12),
-    Bench("tl-naive", "bench_generate.py", (*TL, "--engine", "naive"), "tinyllama/naive.json", 6),
+    Bench("tl-naive", "bench_generate.py", (*TL, "--engine", "naive"), "tinyllama/naive.json", 6, GROWING),
     Bench("tl-kv", "bench_generate.py", (*TL, "--engine", "kv"), "tinyllama/kv.json", 10),
     Bench("tl-kv-graph", "bench_generate.py", (*TL, "--engine", "kv-graph"), "tinyllama/kv-graph.json", 6),
     Bench("tl-serving", "bench_serving.py", (*TL, "--cuda-graph"), "tinyllama/serving.json", 15),

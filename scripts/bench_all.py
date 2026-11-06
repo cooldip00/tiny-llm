@@ -69,12 +69,13 @@ def command(b: R.Bench, run_dir: Path, overwrite: bool) -> list[str]:
     return cmd + (["--overwrite"] if overwrite else [])
 
 
-def run_logged(cmd: list[str], log_path: Path) -> int:
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+def run_logged(cmd: list[str], log_path: Path, extra_env: dict[str, str]) -> int:
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", **extra_env}
     env.setdefault("HF_HUB_OFFLINE", "1")         # weights and data are cached; never wait on the network mid-run
     env.setdefault("HF_DATASETS_OFFLINE", "1")
     with log_path.open("a") as log:
-        log.write(f"\n[{now()}] $ {' '.join(cmd)}\n")
+        prefix = "".join(f"{k}={v} " for k, v in extra_env.items())
+        log.write(f"\n[{now()}] $ {prefix}{' '.join(cmd)}\n")
         log.flush()
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=REPO, env=env)
         assert p.stdout is not None
@@ -119,10 +120,10 @@ def run(args, benches: list[R.Bench], run_dir: Path, rerun: bool) -> int:
         temp, waited = cool_down(args.cool_to, args.cool_max_s)
         print(f"\n=== [{i}/{len(benches)}] {b.name} (~{b.minutes} min) at {temp} °C ===", flush=True)
         t0 = time.monotonic()
-        code = run_logged(command(b, run_dir, overwrite=rerun), log)
+        code = run_logged(command(b, run_dir, overwrite=rerun), log, dict(b.env))
         rec = {"status": "ok" if code == 0 else f"failed (exit {code})", "seconds": round(time.monotonic() - t0),
                "cooldown_s": round(waited), "start_temp_c": temp, "finished_utc": now(),
-               "power_mode": args.power_mode, "git": git, "rerun": rerun}
+               "power_mode": args.power_mode, "git": git, "rerun": rerun, "env": dict(b.env)}
         manifest["benches"][b.name] = rec
         if code != 0:
             save(mpath, manifest)
@@ -175,7 +176,8 @@ def main() -> int:
 
     if args.list:
         for b in R.BENCHES:
-            print(f"{b.name:<13} ~{b.minutes:>2} min  {' '.join(command(b, args.dir, False)[1:])}")
+            env = "".join(f"{k}={v} " for k, v in b.env)
+            print(f"{b.name:<13} ~{b.minutes:>2} min  {env}{' '.join(command(b, args.dir, False)[1:])}")
         print(f"total ~{sum(b.minutes for b in R.BENCHES)} min plus cool-downs")
         return 0
     if args.run and args.only:

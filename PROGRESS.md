@@ -26,7 +26,12 @@ Newest first. One entry per work block: what was done, numbers, next.
 - **`scripts/bench_all.py`:** `--run --power-mode X` runs everything into `runs/bench/v1/` (refuses a dirty tree or a non-empty dir), waits for ≤ 60 °C before each benchmark, copies output to `run.log`, writes `manifest.json`, stops at the first failure. `--only a,b` reruns some; the default only renders. `--list` shows the commands (~90 min plus cool-downs).
 - **Docs:** README results wrapped in `<!-- bench:highlights | tinyllama | serving -->` markers, "Full tables" now points to RESULTS.md. INFERENCE.md: a pointer to RESULTS.md, and the 4.9d continuous table's source (`sweep.log`). D-029. PLAN 6.8 wording fixed (throttle rule uses the busy-clock median).
 - **Checks:** 8 CPU tests in `tests/test_results.py` (render from made-up JSON, marker replacement leaves the rest byte-identical and is idempotent, bad markers refused, missing file names the rerun, heat warnings, overwrite guard, per-mode default names, unique outputs). Full suite **292 passed**. With no results, the render exits 1 and lists all 14 missing files with their `--only` commands. On the real README with fake data, text outside the markers is unchanged.
-- **Next:** commit, then the GPU run on a prepared laptop: `uv run python scripts/bench_all.py --run --power-mode performance`. Then fill this entry's numbers and tick 6.8.
+- Committed `4d72033`.
+- **First GPU run crashed (10:51 UTC):** `30m-naive` (bf16, never benchmarked before; 4.1 was fp32) failed at B=32 P=128 with `CUBLAS_STATUS_INTERNAL_ERROR` in the lm_head matmul, after 7 good rows. Cause: the naive engine's full forward grows by one position per step, so no cached block fits the next request. The caching allocator keeps reserving new blocks until the GPU is full: **7,991 MiB in use for a 475 MiB peak**, `free: 0` on a 192 MB request. PyTorch catches its own OOM and retries after emptying its cache (that is 4.1's `free: 0` warning on the same row), but cuBLAS's internal allocation does not.
+  - Fix: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for the two naive benchmarks only (the other engines use fixed-size caches; graph capture is untouched). Same row, isolated, two runs each: **695 MiB**, no OOM, 940 / 921 tok/s vs 963 / 935 without it. `bench_all` records the env per benchmark in the manifest and the log. +1 test.
+  - The failed attempt is kept in `runs/bench/v1-failed-1/`.
+  - The GPU reached 84 °C during that one row, from a < 60 °C start: the cool-down gate controls only the start.
+- **Next:** commit the fix, rerun into a clean `runs/bench/v1/`, then fill this entry's numbers and tick 6.8.
 
 ### 2026-11-06 — 4.8b: our 30M model exported to HF Llama format
 - Pushed `e336501` (4.8a): CI green.

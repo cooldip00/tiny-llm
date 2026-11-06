@@ -192,3 +192,11 @@ def test_default_output_names_differ_per_mode():
 def test_bench_outputs_are_unique():
     outs = [b.out for b in R.BENCHES]
     assert len(set(outs)) == len(outs) and len(R.BY_NAME) == len(R.BENCHES)
+
+
+def test_only_naive_benches_change_the_allocator():
+    # Growing full-forward buffers fragment the caching allocator (6.8 crash); fixed-size caches and
+    # CUDA graph capture run with the default allocator.
+    changed = {b.name for b in R.BENCHES if b.env}
+    assert changed == {"30m-naive", "tl-naive"}
+    assert all(dict(R.BY_NAME[n].env) == {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"} for n in changed)
