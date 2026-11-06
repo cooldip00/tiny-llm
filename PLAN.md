@@ -104,7 +104,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
     - CLI: `python -m tinyllm.server --model tinyllama | --ckpt PATH --slots 8 --cuda-graph`
     - failure injection (D-028 amendment, +30–45 min): a test-only fault hook in the engine thread (slow step, exception at step N, simulated OOM), so the timeout, 500, not-ready and drain paths are tested by forcing the fault
     - Done when: greedy served outputs equal `generate()`, streamed tokens equal the non-streamed ones, and tests cover 429 on a full queue, the rate limit, timeout, disconnect → slot freed, shutdown mid-request, each injected fault, and the metrics / log fields.
-  - [ ] Step 3: the load generator (`scripts/load_test.py`): Poisson arrivals over a range of rates. Reports TTFT and inter-token p50 / p99, throughput vs rate, goodput at a latency SLO, and 429s / queue wait past capacity. The same client is used against vLLM in 4.8a.
+  - [x] Step 3: _Done 2026-11-06: SLOs in docs/SERVING.md; `scripts/load_test.py` + 3 tests (279 passed). TinyLlama, 8 slots + CUDA graphs, NitroSense Performance: **rated load 4 req/s** (506 tok/s, TTFT p95 0.80 s), saturation ~5.4 req/s / ~690 tok/s, past it 429s and 0 failures. The vLLM half of the 4.13 done-when runs in 4.8a._ The load generator (`scripts/load_test.py`): Poisson arrivals over a range of rates. Reports TTFT and inter-token p50 / p99, throughput vs rate, goodput at a latency SLO, and 429s / queue wait past capacity. The same client is used against vLLM in 4.8a.
     - SLOs written first (D-028 amendment, ~15 min): 2–3 targets in docs/SERVING.md (e.g. TTFT p95, availability, 429 rate), each with its error budget. Goodput is measured against the TTFT target.
 
 ### Track B — Real-scale inference (D-015, D-016)

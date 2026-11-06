@@ -73,6 +73,28 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
   - **goodput**: the highest rate that still meets the latency target
   - behaviour past capacity (429s, queue wait)
 
+## SLOs (4.13 step 3, written before the load test)
+
+Targets are set **before** measuring. If the load test shows a target can't be met at any useful rate, changing it needs a DECISIONS entry, so the goalposts don't move quietly.
+
+All three are measured on the server, from the request log and `/stats` (arrival at the server → token sent; network time excluded). The load generator also measures them on the client, as a cross-check.
+
+| # | SLO | Target: local (TinyLlama, GPU) | Target: Space (30M, free CPU) | Source |
+|---|---|---|---|---|
+| 1 | **TTFT p95** (successful requests; includes queue wait) | ≤ 1 s | ≤ 2 s | `ttft_s` in the request log; `/stats` → `ttft_s.p95` |
+| 2 | **Availability**: share of requests not failed by the server (status ≥ 500, including 504 timeouts) | ≥ 99% | ≥ 99% | `/stats` → `1 − error_rate` |
+| 3 | **Shed rate at rated load**: share of 429s while the offered rate is at or below the rated load | ≤ 1% | ≤ 1% | `/stats` → `reject_rate` |
+
+- **Rated load** = the goodput from the load test: the highest Poisson rate at which SLO 1 still holds. SLOs 2 and 3 are judged up to that rate. Above it, 429s are the intended behaviour (shed load instead of making everyone slow), and only SLO 2 still applies.
+- Client errors (400) and client disconnects (499) count for none of the three.
+- **Error budget** = 1 − target over the window. With 99% availability that's 1 failed request in 100. For example, 1,000 requests in a window may include 10 server failures.
+  - Local: the window is one load-test run. A run that spends more than its budget fails the SLO, and the report says which one.
+  - Space (6.5b): a rolling 7-day window on the status page, showing the budget left for each SLO. **Burn-rate rule** (design, Google SRE style): flag when the 1 h error rate is above 14.4× the budgeted rate. That's Google's fast-burn threshold, which spends 2% of a 30-day budget in an hour; on our 7-day window it's 14.4 / 168 ≈ 9% of the budget in an hour.
+- What uses the SLOs:
+  - the slow-request timeline log (`--slow-s`, set to the TTFT target in practice)
+  - goodput in the load test
+  - the canary's automatic rollback in 6.9: roll back when the canary breaks an SLO that live meets
+
 ## Scaling beyond one server (design only, written up in 6.5b)
 
 - **Replicas:** the server keeps no state between requests, so N copies can run behind a load balancer.

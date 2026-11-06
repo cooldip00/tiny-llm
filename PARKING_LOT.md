@@ -77,3 +77,5 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
   - _Promoted to PLAN 6.9 (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **Written SLOs + error budget** — define 2–3 SLOs (TTFT p95, availability, 429 rate) in SERVING.md with their error budgets, and have the status page show the budget left — 6.5b.
   - _Promoted: defined in PLAN 4.13 step 3, shown in 6.5b (D-028 amendment, 2026-11-06)._
+- [2026-11-06] **Queue sized from the SLO** (from the 4.13 step 3 load test). With `--max-queue 32`, admitted requests waited up to ~5.9 s past capacity, against a 1 s TTFT target. A queue of ≈ TTFT target × throughput (≈ 5 on TinyLlama at 8 slots) sheds more 429s but keeps admitted requests within the SLO. Possibly derive it automatically from the measured throughput. Rerun `load_test.py` at 6 / 8 req/s to compare — 6.5b (Space defaults) or 4.8a.
+  - Also from that run: ITL p99 30–45 ms vs p50 9 ms. Newcomers' prefills stall the decode step, which is more evidence for the chunked-prefill entry of 2026-11-04 above.

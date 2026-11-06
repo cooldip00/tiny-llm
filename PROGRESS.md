@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
 - **Step:** 4.11b CUDA graphs in the continuous engine, starting 2026-11-06 (D-027, ~1 day), then 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-027: 4.11b → 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
-- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025). _Step 2 done 2026-11-06 (see the log)._ **Next action:** 4.13 step 3: SLOs in docs/SERVING.md first, then `scripts/load_test.py`.
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025). _Step 2 done 2026-11-06 (see the log)._ **Next action:** 4.13 step 3: SLOs in docs/SERVING.md first, then `scripts/load_test.py`. _Step 3 done 2026-11-06 (see the log); the vLLM run of the same load test is part of 4.8a._ **Next action:** 4.8a, TinyLlama on vLLM / llama.cpp with the same `load_test.py`.
 - _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -19,6 +19,39 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-06 — 4.13 step 3: SLOs + load generator; first load test on TinyLlama
+- Pushed `8a97d70` + `f33e881`: CI green (49 s; GPU / TinyLlama tests skip there, the 22 server tests run).
+- docs/SERVING.md, "SLOs" (written before measuring; changing a target needs a DECISIONS entry):
+  - TTFT p95 ≤ 1 s local / ≤ 2 s Space
+  - availability ≥ 99%
+  - ≤ 1% 429s at or below rated load
+  - error budgets; the burn-rate rule for the 6.5b status page
+- `scripts/load_test.py`:
+  - Poisson arrivals per rate (seeded); streamed, `ignore_eos`, fixed `max_tokens`, so the same work for our server and vLLM.
+  - Client-side TTFT / ITL / latency p50 / p95 / p99, tok/s, 429s, failures, SLO checks per rate, and the **rated load** (the highest rate where it and every lower rate meet all SLOs).
+  - JSON with provenance in `runs/bench/load/`. `--power-mode` is required.
+  - 3 tests (Poisson rate, summary / SLO / rated-load logic, a live run against the tiny server that must shed at 100 req/s). Full suite **279 passed**.
+- **Load test, TinyLlama 1.1B** (bf16, `--slots 8 --cuda-graph`, max queue 32; NitroSense **Performance** mode, fans Auto, GPU otherwise idle):
+  - Setup: 8 story-opening prompts, 128 tokens each, 60 s per rate.
+
+    | rate (req/s) | sent | ok | 429 | fail | tok/s | TTFT p50 / p95 / p99 | ITL p50 / p99 | latency p99 | SLO |
+    |---|---|---|---|---|---|---|---|---|---|
+    | 0.5 | 23 | 23 | 0 | 0 | 49 | 83 / 162 / 249 ms | 9 / 31 ms | 1.55 s | ok |
+    | 1 | 56 | 56 | 0 | 0 | 119 | 48 / 85 / 100 ms | 9 / 23 ms | 1.41 s | ok |
+    | 2 | 125 | 125 | 0 | 0 | 264 | 50 / 97 / 124 ms | 9 / 42 ms | 1.53 s | ok |
+    | 3 | 173 | 173 | 0 | 0 | 366 | 51 / 222 / 604 ms | 9 / 44 ms | 1.98 s | ok |
+    | 4 | 242 | 242 | 0 | 0 | 506 | 50 / 795 / 1050 ms | 9 / 42 ms | 2.47 s | ok |
+    | 6 | 381 | 348 | 33 | 0 | 689 | 4.50 / 5.81 / 5.90 s | 10 / 43 ms | 7.31 s | miss: TTFT, 429 |
+    | 8 | 454 | 362 | 92 | 0 | 693 | 5.25 / 5.83 / 5.90 s | 10 / 45 ms | 7.33 s | miss: TTFT, 429 |
+
+  - **Rated load 4 req/s** (~506 tok/s). Saturation ~5.4 req/s, ~690 tok/s. That's above the 4.11b offline 581 tok/s at 8 slots, because here every request is the same length, so there's no long-tail drain.
+  - Past capacity the server behaves as designed: the queue fills, the rest get 429, **0 failures**, and TTFT is capped at ~5.9 s = 32 queued ÷ 5.4 req/s. The server's `/stats` agrees (1,458 requests, error rate 0, 429 rate 8.6%, queue wait p95 5.7 s).
+  - ITL p50 stays at 9–10 ms (~105 tok/s per stream) at every load. ITL p99 of 30–45 ms comes from prefills of newly admitted requests stalling the decode step (chunked prefill would fix it; already in PARKING_LOT, 2026-11-04, with this evidence added).
+  - At 0.5 req/s TTFT p50 is *higher* (83 vs 48 ms). Likely the GPU dropping clocks between sparse requests; provenance has the clock samples.
+  - Server: 1,554 JSON log lines (1,458 request lines, no text); VRAM 2.5 GB, RSS 1.5 GB; clean drain on SIGTERM.
+- Observation for later: a 32-place queue lets admitted requests wait ~6 s, far past the 1 s TTFT SLO. A queue sized from the SLO (≈ TTFT target × throughput ≈ 5) would shed more but keep admitted requests within the SLO. Parked (PARKING_LOT 2026-11-06).
+- Next: 4.8a, the same `load_test.py` against vLLM (and llama.cpp) on TinyLlama.
 
 ### 2026-11-06 — 4.13 step 2, parts 3 + 4: the HTTP server and failure injection
 - `src/tinyllm/server.py` (FastAPI + uvicorn, D-025 / D-028; design in docs/SERVING.md):
