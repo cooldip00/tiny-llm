@@ -116,9 +116,12 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
   - [x] 4.9c Correctness: our logits match the HF Transformers reference (oracle only, within bf16 tolerance) _Done 2026-11-04: ours bf16 is bit-identical to HF bf16 (prefill + cached decode, 415 positions); same error vs fp32 (KL 2.6–3.3e-4); top-1 flips only at near-ties (margin ≤ 0.019); greedy text identical on 5/5 prompts. Fixed the transformers-5 `rope_parameters` config layout._
   - [x] 4.9d Rerun the 4.1–4.6 benchmarks on TinyLlama; report decode tok/s as a % of the bandwidth ceiling _Done 2026-11-04: B=1 P=128 decode: CUDA graphs 128 tok/s = 66.8% of the 192 tok/s ceiling (2.8× HF `generate`); eager KV and HF both ~23% (host-bound at ~22 ms/step). Continuous batching 1.10–1.37× static. INT8 Δ val loss +0.0010 but 0.54–0.80× bf16 speed (unfused cast; 4.10b). Found the WSL VRAM-spill slowdown and fixed it in the benchmark. See docs/INFERENCE.md 4.9d._
   - Speculative decoding (4.7) stays on our models only, because the draft model must share TinyLlama's tokenizer
-- [ ] 4.10 Triton kernels — **timeboxed to about half a day, start only after 4.1–4.7 work**
-  - [ ] 4.10a Fused RMSNorm + residual add (first kernel, to learn Triton)
-  - [ ] 4.10b INT8 weight-only GEMV for batch-1 decode (headline kernel)
+- [ ] 4.10 Triton kernels — **timeboxed to about half a day; in v1, before 6.3 (D-016 amendment, 2026-11-06); no longer waits for 4.7**
+  - [ ] 4.10b INT8 weight-only GEMV for batch-1 decode (headline kernel, **first**)
+    - Baseline first: rerun `scripts/bench_all.py --only tl-int8 --power-mode performance` once the GPU is cool (the v1 tl-int8 run was thermally throttled).
+    - `bench_quant.py` gains a CUDA-graph mode; bf16 and int8 are both measured with graphs on (without them, batch-1 decode is bound by kernel launches and hides the kernel).
+    - **Stop rule:** if int8 doesn't beat bf16 at batch 1 with graphs on within the half day, stop, record the numbers in PROGRESS, and leave the README's INT8 explanation as it is.
+  - [ ] 4.10a Fused RMSNorm + residual add, only if the half day has time left
   - For each kernel: `allclose` against the PyTorch reference, achieved GB/s as a % of the measured peak, and end-to-end tok/s delta in the engine
   - Stop after these two. Further kernels go to PARKING_LOT.md
 
@@ -275,8 +278,8 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-04 → 11-05 | 4.12 benchmark provenance; 4.9a `gqa`; 4.9b load TinyLlama; 4.9c logits match HF |
 | 2026-11-06 → 11-08 | 4.11 CUDA graphs on decode; 4.9d TinyLlama benchmarks vs the ceiling; vLLM + llama.cpp install spike |
 | 2026-11-09 → 11-11 | 6.7 CI; first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
-| 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; rest of Phase 6 → **v1** |
-| If ahead | 4.7 prompt-lookup decoding, 4.10 Triton |
+| 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; 4.10b Triton INT8 GEMV before 6.3 (D-016 amendment); rest of Phase 6 → **v1** |
+| If ahead | 4.7 prompt-lookup decoding, 4.10a fused RMSNorm |
 | 2026-11-19 → 11-21 | 6.9 release strategies (D-028) → **v1.1** |
 | After v1 | Phase 5, Phase 7 |
 

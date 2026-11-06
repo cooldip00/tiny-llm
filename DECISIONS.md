@@ -63,6 +63,15 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
 - **Choice:** at most two Triton kernels: fused RMSNorm + residual add, and an INT8 weight-only GEMV for decode. Total budget about half a day, started only after Phase 4 steps 4.1–4.7 work.
 - **Why:** kernel-level skill on the resume, at low cost. Batch-1 decode is a memory-bound GEMV, so the INT8 kernel ties directly to quantization (4.6) and to the bandwidth-ceiling measurements.
 - **Rejected:** CUDA C++ kernels (higher cost, same lesson); writing kernels for everything (scope creep).
+- **Amendment (2026-11-06), 4.10b moves into v1:**
+  - **Context:** the v1 run shows INT8 decode on TinyLlama at 0.75× bf16 at batch 1 and 0.36× at batch 32, and the README names it as a weakness: the weight is cast back to bf16 on every call. The rest of v1 (6.1, 6.3, 6.6, 6.5b) is about a day of work against the ~11-18 date, so there is room for the timebox.
+  - **Choice:**
+    - 4.10b (INT8 GEMV) comes first and 4.10a (fused RMSNorm) only if the half day has time left. 4.10b fixes a result the README already shows; 4.10a was only a warm-up.
+    - 4.10 no longer waits for 4.7, which stays optional.
+    - It is done before 6.3, so the resume bullets use the final numbers.
+    - **Judged with CUDA graphs on**, bf16 and int8 alike. Without graphs, TinyLlama decode at batch 1 is bound by kernel launches (46 vs 128 tok/s), which would hide any kernel gain.
+    - **Stop rule:** if int8 doesn't beat bf16 at batch 1 with graphs on within the half day, stop, record what was measured, and keep the README's current explanation.
+  - **Rejected:** doing it after v1 (bullets would need rewriting, and the weakness would ship in the v1 README); 4.10a first (spends the timebox on the kernel that changes no published number).
 
 ---
 

@@ -50,7 +50,7 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
   7. TRM/HRM-style Sudoku: recursion vs depth
   8. BabyLM Strict-Small (learning from a child-sized ~10M-word budget)
 
-- [2026-11-04] **CUDA graphs for the continuous / paged engines** (4.11 stretch). Bucket by slot count and by the longest slot's length. `SlotKVCache` already keeps its lengths on the device; `begin_step` would need a fixed `_end` (the bucket) instead of `max(self.lens) + 1`. Paged attention needs a fixed block-table shape too.
+- [2026-11-04] **CUDA graphs for the continuous / paged engines** (4.11 stretch). _Continuous engine done in 4.11b (2026-11-06); the paged engine is still open, after v1._ Bucket by slot count and by the longest slot's length. `SlotKVCache` already keeps its lengths on the device; `begin_step` would need a fixed `_end` (the bucket) instead of `max(self.lens) + 1`. Paged attention needs a fixed block-table shape too.
   - _Slot cache done in 4.11b (2026-11-06): 2.37× at 8 slots on TinyLlama. Paged KV still open._
 - [2026-11-04] **`torch.compile(mode="reduce-overhead")` vs manual graphs** (4.11 comparison). After 4.11 the 30M step is GPU-bound across ~430 small kernels (2.5–4 µs each). Fusion (compile, or Triton in 4.10) is the next lever. Also check: graph replay costs 0.35–1.4 ms of host time on WSL, growing with node count. Is that WSL-specific?
 - [2026-11-04] **Slot KV caches sized by `max_seq_len`** (4.9d). On TinyLlama each slot reserves 2,048 positions, so only 8–10% of the continuous engine's KV holds tokens (1.4 GiB at 32 slots). Cap slots at the workload's max prompt + new tokens, or use the paged cache by default for TinyLlama.
