@@ -1,7 +1,6 @@
 # Prior Art & Positioning
 
 Related projects we've studied: what they did, what we adopt, and how we differ.
-Use this in Phase 6 to position the writeup and resume bullets.
 
 ---
 
@@ -34,7 +33,7 @@ Use this in Phase 6 to position the writeup and resume bullets.
 
 ### Lessons that changed our plan
 - **A 30M model gives misleading inference numbers.** About 60 MB of bf16 weights means decode is limited by kernel-launch overhead, not bandwidth. Hence the TinyLlama track (D-015).
-- **Kernel-level skill is a strong resume signal**, which we can get cheaply through Triton. Hence D-016.
+- **Kernel-level work matters**, and Triton gets us some of it cheaply. Hence D-016.
 
 ### Options considered (2026-11-03)
 | Option | Description | Outcome |
