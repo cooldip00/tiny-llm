@@ -122,7 +122,10 @@ def heat(prov: dict | None) -> dict | None:
     clock = d.get("clocks.sm_busy") or d.get("clocks.sm") or {}
     reasons = [r for r in d.get("throttle_reasons_seen") or [] if r != "gpu_idle"]
     warn = sorted(HARD_THROTTLE.intersection(reasons))
-    if clock.get("median") is not None and clock["median"] < MIN_CLOCK_MHZ:
+    # A low clock alone is not throttling: small or host-bound steps leave the GPU idle and it clocks down by
+    # itself (30M KV decode: 1,095 MHz at 65 °C). Flag it only when the driver also reports a thermal slowdown.
+    if (clock.get("median") is not None and clock["median"] < MIN_CLOCK_MHZ
+            and "sw_thermal_slowdown" in reasons):
         warn.append(f"busy clock median {clock['median']:.0f} MHz < {MIN_CLOCK_MHZ}")
     return {"clock_median": clock.get("median"), "clock_min": clock.get("min"),
             "temp_max": (d.get("temperature.gpu") or {}).get("max"), "reasons": reasons, "warn": warn}
@@ -317,6 +320,11 @@ def run_header(data: dict) -> str:
         f"- **Machine:** {first.get('gpu_name', '?')}, driver {first.get('driver', '?')}, "
         f"torch {first.get('torch', '?')}, CUDA {first.get('cuda', '?')}.",
     ]
+    reruns = [(n, r) for n, r in (m.get("benches") or {}).items() if r.get("rerun")]
+    if reruns:
+        lines.append("- **Rerun later with `--only`:** " + ", ".join(
+            f"{n} (finished {str(r.get('finished_utc', '?'))[11:16]} UTC, started at {r.get('start_temp_c', '?')} °C)"
+            for n, r in reruns) + ". Every other benchmark is from the run above.")
     return "\n".join(lines)
 
 
@@ -330,13 +338,15 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
         "(src/tinyllm/results.py) and re-render. -->",
         "",
         "Every number on this page comes from **one** run of `scripts/bench_all.py --run`: one commit, "
-        "one session, one GPU job at a time, with a cool-down to below 60 °C before each benchmark.",
+        "one session, one GPU job at a time, with a cool-down before each benchmark"
+        + (" (a benchmark rerun later with `--only` is listed below)." if any(
+            r.get("rerun") for r in (data["manifest"].get("benches") or {}).values()) else "."),
         "",
         run_header(data),
         "- **How to read it:** ratios between rows of one table are the reliable result; they share a "
         "session and its heat. Absolute tok/s on this laptop moves 10–20% between sessions with "
-        "temperature, so each table ends with its heat line. ⚠ marks a hardware slowdown or a busy "
-        f"clock median below {n(MIN_CLOCK_MHZ)} MHz.",
+        "temperature, so each table ends with its heat line. ⚠ marks a hardware slowdown, or a thermal "
+        f"slowdown with the busy clock median below {n(MIN_CLOCK_MHZ)} MHz.",
         "- **Elsewhere:** dated results and the reasoning behind each step are in "
         "[INFERENCE.md](INFERENCE.md); ours vs vLLM vs llama.cpp under load (4.8a) is in "
         "[SERVING.md](SERVING.md).",

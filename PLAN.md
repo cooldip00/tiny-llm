@@ -168,8 +168,9 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [ ] 6.6 Self-check before sharing (added by D-021): explain every file out loud without notes, e.g. why the KV cache helps, why decode is memory-bandwidth bound, how the paged allocator handles fragmentation, why tied embeddings, the 6N + 12LdT FLOPs formula, why compile helped. Anything that can't be defended stays off the resume.
 
 - [x] 6.7 CI (D-025): GitHub Actions runs the CPU test suite on every push, with a status badge in the README. **Before 6.5a (v1-preview).** _Done 2026-11-05: workflow green; the badge is in the first README._
-- [ ] 6.8 One command regenerates every results table (D-025): `scripts/bench_all.py` runs each benchmark script and writes the INFERENCE.md tables from `runs/bench/*.json`, so the README numbers can be reproduced from the repo. Part of 6.1, v1.
-  - _Plan agreed 2026-11-06, not started. Build ~3–4 h, then one ~1.5–2 h unattended GPU run._
+- [x] 6.8 One command regenerates every results table (D-025): `scripts/bench_all.py` runs each benchmark script and writes the INFERENCE.md tables from `runs/bench/*.json`, so the README numbers can be reproduced from the repo. Part of 6.1, v1.
+  - _Done 2026-11-06 (D-029 + amendment): full run 11:29–12:57 UTC at commit `a765817`, NitroSense performance, 14 / 14 OK; `30m-serving` and `tl-int8` rerun with `--only` after cooling to ≤ 50 °C and reproduced. Output in `docs/RESULTS.md` and the README blocks; JSON in git-ignored `runs/bench/v1/`. See the PROGRESS log._
+  - _Plan agreed 2026-11-06. Build ~3–4 h, then one ~1.5–2 h unattended GPU run._
   - **Why the plan changed:** INFERENCE.md is a dated history. Each table is a snapshot from its step, and the prose quotes those numbers. Regenerating it in place would rewrite history. Some snapshots also have no JSON.
   - **Steps:**
     1. **Fix output-name collisions first.**
@@ -184,7 +185,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
          - Not vLLM / llama.cpp: they need `~/spike`, and the 4.8a JSON from 2026-11-06 is reused.
        - Default (no `--run`): rebuilds the tables from the JSON in seconds, with no GPU. `--only <bench>` reruns one benchmark.
        - **Cool-down gate:** before each benchmark, wait until the GPU is below ~60 °C (adds ~10–15 min in total).
-       - **Throttle warning:** flags a benchmark whose provenance shows a hardware slowdown (`hw_slowdown`, `hw_thermal_slowdown`, `hw_power_brake_slowdown`) or a busy SM clock *median* below 1,400 MHz, and suggests `--only`. The median, not the minimum: single busy samples dip to ~345 MHz even in good runs.
+       - **Throttle warning:** flags a benchmark whose provenance shows a hardware slowdown (`hw_slowdown`, `hw_thermal_slowdown`, `hw_power_brake_slowdown`) or a busy SM clock *median* below 1,400 MHz, and suggests `--only`. The median, not the minimum: single busy samples dip to ~345 MHz even in good runs. _Narrowed after the run (D-029 amendment): a low median counts only together with `sw_thermal_slowdown`; on its own it is a host-bound GPU clocking down._
        - Copies all console output to `runs/bench/v1/run.log`. The 11-04 numbers survived only because `sweep.log` existed.
     3. **Where the output goes**
        - New `docs/RESULTS.md`: fully generated, and its header says so. One heat line per table: SM clock median / minimum, peak temperature, throttle reasons.

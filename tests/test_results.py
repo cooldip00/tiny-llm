@@ -93,7 +93,10 @@ def fake_run(tmp_path: Path) -> Path:
         p = tmp_path / R.BY_NAME[name].out
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(d))
-    (tmp_path / R.MANIFEST).write_text(json.dumps({"power_mode": "performance", "finished_utc": "2026-11-07T12:00"}))
+    (tmp_path / R.MANIFEST).write_text(json.dumps({
+        "power_mode": "performance", "finished_utc": "2026-11-07T12:00",
+        "benches": {"tl-hf": {"rerun": False}, "tl-int8": {"rerun": True, "finished_utc": "2026-11-07T13:42:20+00:00",
+                                                           "start_temp_c": 49.0}}}))
     return tmp_path
 
 
@@ -128,6 +131,8 @@ def test_render_results_from_one_run(tmp_path):
     assert "1,600 MHz (min 1,400), 80 °C, sw_power_cap" in page and "gpu_idle" not in page
     assert "None" not in page and "\n\n\n" not in page and "Throttling warnings" not in page
     assert "token 43 / token 43" in page and " ‡" in page                # 30M naive at P=512 slides its window
+    assert "**Rerun later with `--only`:** tl-int8 (finished 13:42 UTC, started at 49.0 °C)." in page
+    assert "tl-hf (" not in page
 
 
 def test_readme_blocks_replace_only_inside_markers(tmp_path):
@@ -165,7 +170,8 @@ def test_heat_warnings():
     assert R.heat(None) is None and R.heat_text(None) == "not recorded"
     assert R.heat(prov())["warn"] == []
     assert R.heat(prov(reasons=("hw_thermal_slowdown",)))["warn"] == ["hw_thermal_slowdown"]
-    low = R.heat(prov(clock=1200.0))
+    assert R.heat(prov(clock=1200.0))["warn"] == []          # idle-ish GPU clocking down: not throttling
+    low = R.heat(prov(clock=1200.0, reasons=("sw_thermal_slowdown",)))
     assert low["warn"] and R.heat_text(low).startswith("⚠ ")
 
 

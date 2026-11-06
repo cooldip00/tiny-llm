@@ -324,3 +324,7 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - Regenerating INFERENCE.md in place: rewrites history, and some tables have no JSON.
   - Rendering from the existing scattered JSONs: mixed sessions and commits, some files with no provenance.
   - Flagging on the clock minimum: single busy samples dip far below 1,400 MHz in good runs.
+- **Amendment (2026-11-06), after the first full run:**
+  - **Throttle rule narrowed:** flag a hardware slowdown (`hw_slowdown`, `hw_thermal_slowdown`, `hw_power_brake_slowdown`), or a busy SM clock median below 1,400 MHz *together with* `sw_thermal_slowdown`. A low clock alone is not throttling: small or host-bound steps leave the GPU idle and it clocks down by itself (30M KV decode: 1,095 MHz median at 65 °C, no thermal reason). The old rule flagged 5 of 14 benchmarks; the new one flags 2, both reproduced by a rerun after cooling to ≤ 50 °C.
+  - **Reruns are stated:** `--only` reruns into the same directory are marked in `manifest.json`, and RESULTS.md lists each one with its finish time and start temperature, so "one run" is never claimed for a number that came later.
+  - **Allocator:** the two naive benchmarks run with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (their full forward grows each step and fragments the caching allocator; first run crashed in cuBLAS). Recorded per benchmark in the manifest and `run.log`.

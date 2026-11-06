@@ -122,7 +122,7 @@ def run(args, benches: list[R.Bench], run_dir: Path, rerun: bool) -> int:
         t0 = time.monotonic()
         code = run_logged(command(b, run_dir, overwrite=rerun), log, dict(b.env))
         rec = {"status": "ok" if code == 0 else f"failed (exit {code})", "seconds": round(time.monotonic() - t0),
-               "cooldown_s": round(waited), "start_temp_c": temp, "finished_utc": now(),
+               "cooldown_s": round(waited), "cool_to_c": args.cool_to, "start_temp_c": temp, "finished_utc": now(),
                "power_mode": args.power_mode, "git": git, "rerun": rerun, "env": dict(b.env)}
         manifest["benches"][b.name] = rec
         if code != 0:

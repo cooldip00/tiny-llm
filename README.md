@@ -6,9 +6,9 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 
 **Highlights**
 <!-- bench:highlights -->
-- **TinyLlama 1.1B decodes at 128 tok/s at batch 1: 67% of the bandwidth ceiling, 2.8× HF `generate`** (KV cache + CUDA graphs).
+- **TinyLlama 1.1B decodes at 127 tok/s at batch 1: 66% of the bandwidth ceiling, 2.9× HF `generate`** (KV cache + CUDA graphs).
 - **Our engine's logits are bit-identical to HF Transformers** in bf16 on TinyLlama, prefill and cached decode.
-- **Serving:** continuous batching gives 1.37× static batching. A paged KV cache fits 25 sequences where contiguous slots fit 8, for 1.46× the throughput in the same memory.
+- **Serving:** continuous batching gives 1.38× static batching. A paged KV cache fits 25 sequences where contiguous slots fit 8, for 1.62× the throughput in the same memory.
 <!-- /bench:highlights -->
 - **Training:** a 30M-parameter model on ~1B TinyStories tokens in 2 h 27 min at **56% MFU**.
 
@@ -21,15 +21,15 @@ Decode speed at batch 1 with a 128-token prompt, 256 new tokens, median of 5 run
 
 | Engine | tok/s | % of ceiling | ms / step |
 |---|---|---|---|
-| HF Transformers `generate` (bf16, SDPA) | 45 | 23% | 22.3 |
-| Ours, naive (full forward per token) | 33 | 17% | 29.9 |
-| Ours, KV cache | 45 | 23% | 22.3 |
-| **Ours, KV cache + CUDA graphs** | **128** | **67%** | **7.8** |
+| HF Transformers `generate` (bf16, SDPA) | 44 | 23% | 22.6 |
+| Ours, naive (full forward per token) | 31 | 16% | 32.0 |
+| Ours, KV cache | 48 | 25% | 20.8 |
+| **Ours, KV cache + CUDA graphs** | **127** | **66%** | **7.9** |
 
-- **Eager decode is host-bound.** HF and our eager engine both spend ~22 ms per step launching kernels, whatever the batch size. Capturing the decode step as a CUDA graph removes that overhead; the GPU is then idle only 3% of the step.
-- **Batching:** with graphs, 851 tok/s at batch 8 and 2,083 tok/s at batch 32 (HF: 358 and 1,445).
-- **INT8 weights:** quality is unchanged (val loss +0.0010, 98.5% argmax agreement with bf16), but decode is **slower**: 0.80× bf16 at batch 1, 0.54× at batch 32. The weight is cast back to bf16 on every call, so each step moves more bytes, not fewer. A fused dequantize-and-multiply kernel fixes this; it's on the roadmap.
-- **Correctness:** bf16 logits equal HF's bf16 logits exactly (`torch.equal`) at all 415 test positions. Every top-1 disagreement with fp32 is a near-tie (margin < 0.02 logits).
+- **Eager decode is host-bound.** At batch 1, HF and our eager engine take 22.6 and 20.8 ms per step (ours 20.5 ms at batch 32). The profiler shows the GPU idle 76% of an eager step, waiting for kernel launches. Capturing the decode step as a CUDA graph removes that overhead; the GPU is then idle 3% of the step.
+- **Batching:** with graphs, 814 tok/s at batch 8 and 1,984 tok/s at batch 32 (HF: 359 and 1,440).
+- **INT8 weights:** val loss +0.0010, 98.5% argmax agreement with bf16; decode is 0.75× bf16 at batch 1, 0.36× at batch 32. Slower, not faster: the weight is cast back to bf16 on every call, so each step moves more bytes, not fewer. A fused dequantize-and-multiply kernel fixes this; it's on the roadmap.
+- **Correctness:** bf16 logits equal HF's bf16 logits exactly (`torch.equal`) at all 415 test positions. Every top-1 disagreement with fp32 is a near-tie (margin ≤ 0.019 logits).
 <!-- /bench:tinyllama -->
 
 Full tables from the same run, with GPU clocks and temperatures: [docs/RESULTS.md](docs/RESULTS.md). The method, caveats and the dated results of each step: [docs/INFERENCE.md](docs/INFERENCE.md).
@@ -37,15 +37,15 @@ Full tables from the same run, with GPU clocks and temperatures: [docs/RESULTS.m
 ## Results: serving
 
 <!-- bench:serving -->
-64 requests of mixed lengths (9,004 tokens to generate), median of 3–5 runs.
+64 requests of mixed lengths (9,004 tokens to generate), median of 3 runs.
 
 | Scheduler / cache | Setting | tok/s | vs baseline |
 |---|---|---|---|
-| Static batching (TinyLlama) | 8 slots | 198 | — |
-| Continuous batching (TinyLlama) | 8 slots | 272 | 1.37× |
-| Continuous batching + CUDA graphs (TinyLlama) | 8 slots | 581 | 2.37× vs eager continuous in the same run (245) |
-| Contiguous KV slots (30M model) | 64 MiB of KV, 8 sequences | 633 | — |
-| Paged KV cache (30M model) | same 64 MiB, 25 sequences | 924 | 1.46× |
+| Static batching (TinyLlama) | 8 slots | 189 | — |
+| Continuous batching (TinyLlama) | 8 slots | 261 | 1.38× |
+| Continuous batching + CUDA graphs (TinyLlama) | 8 slots | 581 | 2.23× vs eager continuous |
+| Contiguous KV slots (30M model) | 64 MiB of KV, 8 sequences | 615 | — |
+| Paged KV cache (30M model) | same 64 MiB, 25 sequences | 998 | 1.62× |
 
 The paged cache stores KV in fixed-size blocks through a per-sequence block table, as in vLLM, so a sequence holds only the blocks it has filled. The share of reserved KV holding real tokens goes from 52% to 97%.
 <!-- /bench:serving -->
@@ -106,7 +106,7 @@ flowchart LR
 | `src/tinyllm/quant.py` | INT8 weight-only quantization |
 | `src/tinyllm/hf_llama.py`, `safetensors_io.py` | Loads Llama-format checkpoints (TinyLlama) and exports to them |
 | `scripts/` | Data, tokenizer and benchmark scripts |
-| `tests/` | 221 tests: every optimized path is checked against the slow reference path |
+| `tests/` | 293 tests: every optimized path is checked against the slow reference path |
 | `docs/` | Architecture, inference results, hardware, setup log |
 
 ## Reproduce
@@ -129,6 +129,10 @@ uv run python scripts/tinyllama_smoke.py
 uv run python scripts/bench_generate.py --model tinyllama --engine kv-graph
 uv run python scripts/bench_serving.py --model tinyllama
 uv run python scripts/bench_quant.py --model tinyllama
+
+# Every results table: rerun all benchmarks (~1.5–2 h), then render docs/RESULTS.md and the README tables
+uv run python scripts/bench_all.py --run --power-mode performance
+uv run python scripts/bench_all.py               # re-render from the saved JSON, no GPU
 ```
 
 CI runs the CPU test suite on every push. GPU benchmark numbers come from the laptop. The benchmark scripts save each result with the commit, library versions, and the GPU clocks and throttling seen during the run.
@@ -138,7 +142,6 @@ CI runs the CPU test suite on every push. GPU benchmark numbers come from the la
 - Compare with vLLM and llama.cpp on the same GPU
 - Fused INT8 dequantize + matrix-vector kernel in Triton
 - CUDA graphs for the paged engine (the continuous engine has them)
-- One command that regenerates every results table
 - Attention ablation (MHA vs GQA vs MLA vs a Gated DeltaNet hybrid) at a fixed compute budget ([docs/RESEARCH.md](docs/RESEARCH.md))
 
 ## License
