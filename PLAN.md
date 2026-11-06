@@ -95,7 +95,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
   - Done when served outputs equal `generate()` for greedy requests, and the load test runs against both our server and vLLM. **v1, before 4.8a.**
   - Scope extended by D-028 (2026-11-06; design in [docs/SERVING.md](docs/SERVING.md)). Estimate now ~11–13 h in total.
   - [x] Step 1: `ContinuousEngine` (`add_request` / `step` / `abort`). _Done 2026-11-06, 239 passed._
-  - [ ] Step 2: the server (`src/tinyllm/server.py`, `src/tinyllm/obs.py`; adds fastapi, uvicorn, httpx):
+  - [x] Step 2: the server (`src/tinyllm/server.py`, `src/tinyllm/obs.py`; adds fastapi, uvicorn, httpx): _Done 2026-11-06: 22 server tests (real uvicorn on 127.0.0.1) cover every done-when item, 3 reruns all green; full suite 276 passed; CLI smoke on `checkpoints/main/best.pt` (GPU): stream text == non-stream text._
     - `POST /v1/completions`: text or token ids, `max_tokens`, `temperature`, `top_p`, `top_k`, `ignore_eos`, SSE streaming ending with `[DONE]`, `finish_reason`, `usage`
     - per-request sampling, with rows grouped by identical settings
     - hardening: `/health`, `/ready`, a bounded queue → 429 + `Retry-After`, a per-client rate limit, a per-request timeout, abort on client disconnect, graceful shutdown (drain), an engine error → 500 + not ready

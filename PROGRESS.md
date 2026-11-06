@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
 - **Step:** 4.11b CUDA graphs in the continuous engine, starting 2026-11-06 (D-027, ~1 day), then 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-027: 4.11b → 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
-- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025).
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025). _Step 2 done 2026-11-06 (see the log)._ **Next action:** 4.13 step 3: SLOs in docs/SERVING.md first, then `scripts/load_test.py`.
 - _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -19,6 +19,30 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-06 — 4.13 step 2, parts 3 + 4: the HTTP server and failure injection
+- `src/tinyllm/server.py` (FastAPI + uvicorn, D-025 / D-028; design in docs/SERVING.md):
+  - `EngineWorker`: one thread owns the `ContinuousEngine`; handlers talk to it through an inbox; tokens come back over a per-request `asyncio.Queue` via `call_soon_threadsafe`.
+  - `POST /v1/completions`: text or token ids, `max_tokens`, `temperature`, `top_p`, `top_k`, `ignore_eos`, `return_token_ids`; SSE streaming ending with `[DONE]` (incremental detokenizer: the streamed text equals the non-streamed text); `finish_reason` stop / length; `usage`; OpenAI error shape.
+  - Hardening: a bounded queue (slots + `--max-queue`) → 429 + `Retry-After`; a per-client token-bucket rate limit → 429; a per-request timeout → 504 with the slot freed; client disconnect → abort (499 in metrics); graceful drain on shutdown; an engine error → 500, `/health` + `/ready` 503, new requests 503; OOM → 503 for in-flight requests, then recovery.
+  - Observability: a JSON log line per request (no text; salted client hash), `X-Request-ID` (the client's if sane), `X-Model-Version` (checkpoint hash + git commit), engine snapshots every 5 s, `/stats`, `/metrics`, per-step debug timings, slow-request timelines, `/debug/state` (localhost only).
+  - `Router` with one variant (6.9 adds release rules here). CLI: `python -m tinyllm.server --model tinyllama | --ckpt PATH`.
+  - `Faults` (test only): a slow step, an exception at step N, an OOM at step N.
+- `engine.py`: `load()` (queued, busy) and `kv_used_frac()`.
+- Deps: fastapi 0.162.0, uvicorn 0.54.0; dev: httpx 0.28.1.
+- `tests/test_server.py`, 22 tests against real uvicorn on 127.0.0.1, port 0 (httpx's ASGI transport buffers streams):
+  - greedy == `generate()` for id and text prompts, and with 7 concurrent requests on 3 slots
+  - stream == non-stream; EOS → `stop`
+  - 9 kinds of 400
+  - 429 on a full queue; the rate limit; 504 (non-stream and stream)
+  - disconnect (non-stream and stream) → slot freed
+  - shutdown mid-request → 200
+  - metrics, stats and log fields
+  - the injected engine error and the injected OOM
+- Bug found by the tests: the non-stream disconnect check only ran when no token had arrived for 0.25 s, so a busy request never noticed. It now checks on a timer.
+- Three reruns, all green (~11 s each). Full suite **276 passed** (116.9 s).
+- CLI smoke on `checkpoints/main/best.pt` (GPU, 4 slots): 200 with headers, the stream text equals the non-stream text, `/stats` filled, JSON logs, clean shutdown.
+- Next: 4.13 step 3, SLOs first, then `scripts/load_test.py`.
 
 ### 2026-11-06 — 4.13 step 2, part 1: per-request sampling
 - `engine.py`:

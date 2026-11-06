@@ -277,6 +277,13 @@ class ContinuousEngine:
     def has_work(self) -> bool:
         return bool(self._queue) or any(self.slots.active)
 
+    def load(self) -> tuple[int, int]:
+        """(requests waiting for a slot, slots decoding a request)."""
+        return len(self._queue), sum(self.slots.active)
+
+    def kv_used_frac(self) -> float:
+        return self.slots.used_tokens() / max(1, self.slots.reserved_tokens())
+
     def abort(self, rid: int) -> bool:
         """Drop an unfinished request (e.g. its client went away), freeing its slot.
         Returns False if it is unknown or already finished. No Result is kept."""
