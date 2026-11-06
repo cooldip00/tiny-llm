@@ -73,6 +73,28 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
   - **goodput**: the highest rate that still meets the latency target
   - behaviour past capacity (429s, queue wait)
 
+### Results: TinyLlama on three engines (4.8a, 2026-11-06)
+
+Same client (`scripts/load_test.py`), same 8 story prompts (14 tokens), `ignore_eos`, bf16 weights unless noted, NitroSense Performance mode. Prefix caching is off: vLLM `--no-enable-prefix-caching`, llama.cpp `--no-cache-prompt`; we don't have it.
+- **B=1:** 20 requests × 256 tokens, one at a time. Decode speed excludes the first token (prefill). Ceiling = 423 GB/s ÷ weight bytes: 192.3 tok/s for bf16, 361.6 tok/s for Q8_0.
+- **Sweep:** Poisson arrivals, 128 tokens per request, 60 s per rate, local SLOs (TTFT p95 ≤ 1 s).
+
+| Setup | Seats | B=1 decode (% of ceiling) | Rated load | Saturation | ITL p50 / p99 at 4 req/s | Past saturation |
+|---|---|---|---|---|---|---|
+| ours, `--slots 8 --cuda-graph` | 8 | 111.7 tok/s (58.1%) | 4 req/s | ~5.5 req/s, ~710 tok/s | 9 / 41 ms | 429s; TTFT p95 capped at ~5.9 s by the 32-place queue |
+| ours, `--slots 32 --cuda-graph` | 32 | (same engine) | 8 req/s | ≥ 12.2 req/s, 1,555 tok/s at 16 | 13 / 46 ms | 429s; TTFT p95 2.6–2.9 s |
+| vLLM 0.33, `--max-num-seqs 8` | 8 | 160.7 tok/s (83.5%) | 6 req/s | ~8.5 req/s, ~1,090 tok/s | 7 / 15 ms | no 429s; unbounded queue, TTFT p95 48 s at 16 req/s |
+| vLLM 0.33, default (256 seqs) | 256 | 160.9 tok/s (83.7%) | 32 req/s | ~34 req/s, ~4,370 tok/s | 7 / 9 ms | TTFT p95 21 s at 48 req/s |
+| llama.cpp `61d4472`, bf16 GGUF, `-np 8` | 8 | 151.0 tok/s (78.5%) | 4 req/s | peak 5.4 req/s at 6, then **falls** to 3.5 at 16 | 10 / 30 ms | no 429s; TTFT p95 203 s at 16 req/s |
+| llama.cpp, Q8_0 GGUF, `-np 8` | 8 | 233.9 tok/s (64.7% of 361.6) | 4 req/s | peak 6.2 req/s, then falls to 3.8 at 16 | 9 / 29 ms | no 429s; TTFT p95 182 s at 16 req/s |
+
+What it shows:
+- **One stream (B=1) is kernel speed.** vLLM reaches 84% of the bandwidth ceiling, we reach 58%. vLLM uses FlashAttention and fused kernels; we use SDPA over padded slots and graph only the decode step.
+- **Under load, seats set the capacity.** By Little's law, saturation ≈ seats ÷ time per request: 8 ÷ ~1.4 s ≈ 5.7 req/s for us, 8 ÷ ~0.9 s ≈ 8.9 for vLLM at 8 seqs. Going from 8 to 32 slots doubled our rated load. vLLM's default admits up to 256 sequences into a paged KV pool (70% of VRAM), so it is limited by compute, not by seats.
+- **Past saturation the engines differ by design.** We shed with 429s and keep TTFT bounded. vLLM queues without limit, so TTFT grows with the backlog. llama.cpp's throughput *drops* under overload (cause not investigated; our client handled 947 streams against vLLM in the same run).
+- At equal seats we tie llama.cpp bf16 under load (rated 4 req/s each, ~690 tok/s saturation), even though it is 1.35× faster at B=1.
+- **Caveat:** every run was thermally throttled (GPU 84–87 °C, SM clock medians 1,515–1,770 MHz; provenance in `runs/bench/load/4.8a/`). Treat differences within ~15% as ties. The 1.3–1.5× gaps above are well outside that.
+
 ## SLOs (4.13 step 3, written before the load test)
 
 Targets are set **before** measuring. If the load test shows a target can't be met at any useful rate, changing it needs a DECISIONS entry, so the goalposts don't move quietly.
@@ -94,6 +116,38 @@ All three are measured on the server, from the request log and `/stats` (arrival
   - the slow-request timeline log (`--slow-s`, set to the TTFT target in practice)
   - goodput in the load test
   - the canary's automatic rollback in 6.9: roll back when the canary breaks an SLO that live meets
+
+## Prefix caching (not implemented; noted 2026-11-06 in 4.8a)
+
+**What it is.** Before generating, the server runs the whole prompt through the model once (prefill) and keeps the result for each prompt token in the KV cache. Normally that cache is thrown away when the request ends. With prefix caching, the server keeps it, indexed by the prompt's tokens. When a later request starts with the same tokens, it reuses that KV and only prefills the new part.
+
+Example: 100 chat users share the same 500-token system prompt. Without prefix caching, every request prefills 500 + N tokens. With it, the first request prefills 500 + N and later ones prefill only their own N. TTFT and GPU work drop a lot.
+
+**Where we stand.** We don't have it: every request prefills its full prompt. vLLM (on by default in V1) and llama.cpp (per-slot prompt reuse) both do. The 4.8a API check saw llama.cpp report 13 of 14 prompt tokens cached on a repeated prompt.
+
+**Why it matters little for us now:**
+- The load-test prompts are ~15 tokens, so there is little to reuse. For the matched 4.8a comparison it is turned off in the other engines where they allow it (vLLM `--no-enable-prefix-caching`), and each run records the setting.
+- The Space demo is story continuation with short openings and no long shared system prompt.
+- It matters for chat with long system prompts, multi-turn conversations (each turn resends the history), RAG instructions and few-shot prompts.
+
+**Two ways to add it:**
+
+| | A. Reuse within a slot (llama.cpp style) | B. Shared blocks (vLLM style) |
+|---|---|---|
+| How | When a slot frees up, keep its KV. If the next request in that slot starts with the same tokens, prefill only the rest. | KV in fixed-size blocks, indexed by a hash of the prefix. Any request can share any cached block; refcounts track users, and old blocks are evicted when memory runs short. |
+| Builds on | The slot cache (works with CUDA graphs) | The paged cache from 4.5 (no CUDA graphs yet, so slower today) |
+| Hit rate | Only if the matching request lands in the same slot | Any request, any slot; many requests share one copy |
+| Estimate | ~3–4 h | ~6–8 h, plus ~3–4 h of CUDA graphs for paged KV to keep it fast |
+
+Common to both:
+- **Gains:** large TTFT and compute savings on long shared prefixes. Why it's correct: the reused tokens keep the same positions, so their RoPE values are still valid.
+- **Costs:**
+  - The engine's padded prefill would have to start each row at a different offset (the cached length). This is the main work.
+  - Cached KV takes memory and needs an eviction policy.
+  - New correctness risk: served output must still equal `generate()` exactly.
+  - Privacy side channel: a fast TTFT reveals that someone recently sent the same prefix. vLLM adds a per-user "cache salt" to the block hash to prevent this; we would need the same.
+
+**Decision (2026-11-06):** not before v1; it adds about nothing for short-prompt workloads. A is the right size for v1.1. B only together with CUDA graphs for the paged cache (Phase 7). Parked in PARKING_LOT (the 4.5 entry, item d). With several replicas, prefix-aware routing (below) is what makes it pay off.
 
 ## Scaling beyond one server (design only, written up in 6.5b)
 

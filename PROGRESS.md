@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
 - **Step:** 4.11b CUDA graphs in the continuous engine, starting 2026-11-06 (D-027, ~1 day), then 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-027: 4.11b → 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
-- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025). _Step 2 done 2026-11-06 (see the log)._ **Next action:** 4.13 step 3: SLOs in docs/SERVING.md first, then `scripts/load_test.py`. _Step 3 done 2026-11-06 (see the log); the vLLM run of the same load test is part of 4.8a._ **Next action:** 4.8a, TinyLlama on vLLM / llama.cpp with the same `load_test.py`.
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025). _Step 2 done 2026-11-06 (see the log)._ **Next action:** 4.13 step 3: SLOs in docs/SERVING.md first, then `scripts/load_test.py`. _Step 3 done 2026-11-06 (see the log); the vLLM run of the same load test is part of 4.8a._ **Next action:** 4.8a, TinyLlama on vLLM / llama.cpp with the same `load_test.py`. _4.8a done 2026-11-06, which also closes 4.13 (see the log)._ **Next action:** 4.8b, export the 30M model to HF Llama format, then 6.8.
 - _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -19,6 +19,30 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-06 — 4.8a: TinyLlama on ours vs vLLM vs llama.cpp (closes 4.13)
+- `scripts/load_test.py --sequential N --weight-bytes B`: one request at a time; decode tok/s excluding the first token, as a % of the bandwidth ceiling (423 GB/s ÷ weight bytes). 2 tests (summary logic; a live sequential run against the tiny server). Full suite **281 passed**.
+- **API check** (all three servers, same request): exactly `max_tokens` tokens, 14 prompt tokens, usage in the stream, finish `length`, `[DONE]`. vLLM and llama.cpp send usage in a last chunk with no text; the client already handled it.
+- **Setup:** one server at a time, NitroSense **Performance** mode, fans Auto. TinyLlama @ `fe8a4ea`, bf16 unless noted. Prefix caching off (vLLM `--no-enable-prefix-caching`, llama.cpp `--no-cache-prompt`; confirmed in the server logs). llama.cpp: 8 slots × 2048 context, KV not unified. B=1: 20 × 256 tokens. Sweep: 128 tokens, 60 s per rate, local SLOs. 0 failures in every run; GPU back to 0 MiB after each server.
+
+  | Setup | Seats | B=1 decode | % of ceiling | B=1 TTFT p50 | Rated load | Saturation | ITL p50 / p99 at 4 req/s | Past saturation |
+  |---|---|---|---|---|---|---|---|---|
+  | ours, 8 slots, graphs | 8 | 111.7 tok/s | 58.1% | 41 ms | 4 req/s | ~5.5 req/s, ~710 tok/s | 9 / 41 ms | 429s, TTFT p95 ~5.9 s |
+  | ours, 32 slots, graphs | 32 | — | — | — | 8 | ≥ 12.2 req/s, 1,555 tok/s at 16 | 13 / 46 ms | 429s, TTFT p95 2.6–2.9 s |
+  | vLLM 0.33, 8 seqs | 8 | 160.7 | 83.5% | 16 ms | 6 | ~8.5 req/s, ~1,090 tok/s | 7 / 15 ms | no 429s, TTFT p95 48 s at 16 |
+  | vLLM 0.33, default (256) | 256 | 160.9 | 83.7% | 16 ms | 32 | ~34 req/s, ~4,370 tok/s | 7 / 9 ms | TTFT p95 21 s at 48 |
+  | llama.cpp bf16, 8 slots | 8 | 151.0 | 78.5% | 12 ms | 4 | peak 5.4 req/s at 6, falls to 3.5 at 16 | 10 / 30 ms | no 429s, TTFT p95 203 s at 16 |
+  | llama.cpp Q8_0, 8 slots | 8 | 233.9 | 64.7% of 361.6 | 11 ms | 4 | peak 6.2 req/s, falls to 3.8 at 16 | 9 / 29 ms | no 429s, TTFT p95 182 s at 16 |
+
+  - **B=1:** vLLM is 1.44× us; llama.cpp bf16 1.35×. That's kernel speed: FlashAttention and fused ops vs our SDPA over padded slots.
+  - **Under load, seats decide.** Little's law: 8 ÷ ~1.4 s per request ≈ 5.7 req/s for us, 8 ÷ ~0.9 s ≈ 8.9 for vLLM-8. 32 slots doubled our rated load (4 → 8 req/s), with ITL p50 rising 9 → 15 ms. vLLM's default (paged KV pool, 256 seqs) had only ~16 requests in flight at 16 req/s, and saturates at ~34 req/s.
+  - At 8 seats we tie llama.cpp bf16 under load (rated 4 req/s each, ~690–710 tok/s) despite its faster B=1.
+  - **Overload:** we shed (429s, bounded TTFT). vLLM queues without limit. llama.cpp's throughput drops by ~35% past its peak; cause not investigated (not our client: it handled 947 streams against vLLM).
+  - **Throttling:** every run was thermally throttled (84–87 °C; `sw_power_cap`, `sw_thermal_slowdown`, some `hw_slowdown`). SM clock medians 1,515–1,770 MHz in the sweeps. At B=1 ours ran at 1,875 MHz / 76 °C, the others at 1,530–1,695 MHz, so our B=1 number is if anything flattered. Differences within ~15% are ties; the 1.3–1.5× gaps are not.
+  - All records carry git `ccdc521+dirty` (this uncommitted `--sequential` mode). Raw JSON + server logs in `runs/bench/load/4.8a/` (git-ignored).
+- Written up in docs/SERVING.md, "Load testing" → "Results". Prefix caching explained in SERVING.md (not implemented; A for v1.1, B in Phase 7). Parked: the leading space dropped from served text (PARKING_LOT 2026-11-06).
+- **4.13 closed:** its done-when (greedy outputs = `generate()`, load test against our server and vLLM) is met.
+- **Next:** 4.8b (export the 30M model to HF Llama format), then 6.8.
 
 ### 2026-11-06 — 4.13 step 3: SLOs + load generator; first load test on TinyLlama
 - Pushed `8a97d70` + `f33e881`: CI green (49 s; GPU / TinyLlama tests skip there, the 22 server tests run).

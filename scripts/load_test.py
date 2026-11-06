@@ -15,12 +15,20 @@ Measured on the client (SLOs in docs/SERVING.md are server-side; this is the cro
 - throughput: completion tokens / wall time (first send → last completion).
 - 429s (shed load) and failures (status >= 500, error chunks, connection errors).
 
+`--sequential N` instead sends N requests one after another (one in flight, closed loop): the
+single-request (B=1) decode speed through the HTTP path, for comparing engines in 4.8a. Decode
+tok/s per request = (tokens - 1) / (last chunk - first chunk), so prefill and queueing are out
+of it. With `--weight-bytes`, it is also shown as a % of the bandwidth ceiling (423 GB/s /
+weight bytes, docs/HARDWARE.md).
+
 Rated load (goodput) = the highest rate at which the run, and every lower rate, meets all
 three SLOs: TTFT p95 <= target, availability >= 99%, 429s <= 1%. Server-side queue wait is in
 the server's request log and `/stats`.
 
     uv run python scripts/load_test.py --url http://127.0.0.1:8000 --rates 1,2,4,8,16 \\
         --duration 60 --max-tokens 128 --slo local --power-mode Performance --label ours-8slots
+    uv run python scripts/load_test.py --sequential 20 --max-tokens 256 --weight-bytes 2.2e9 \\
+        --power-mode Performance --label ours-b1
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from tinyllm.obs import percentile
 SLO_TTFT_P95_S = {"local": 1.0, "space": 2.0}      # docs/SERVING.md, "SLOs"
 SLO_AVAILABILITY = 0.99
 SLO_SHED_MAX = 0.01
+BANDWIDTH = 423e9           # bytes/s, Phase 0.5 measurement (docs/HARDWARE.md)
 
 PROMPTS = [
     "Once upon a time, there was a little dog named Max.",
@@ -143,6 +152,25 @@ def summarize(results: list[Result], rate: float, wall_s: float, ttft_slo_s: flo
     return s
 
 
+def summarize_sequential(results: list[Result], wall_s: float, weight_bytes: float | None) -> dict:
+    """One request at a time: per-request decode speed, excluding prefill (first chunk)."""
+    ok = [r for r in results if r.status == 200 and r.ttft_s is not None and r.latency_s is not None]
+    decode = [(r.tokens - 1) / (r.latency_s - r.ttft_s) for r in ok if r.tokens > 1 and r.latency_s > r.ttft_s]
+    rnd = lambda x: None if x is None else round(x, 4)       # noqa: E731
+    s = {
+        "sent": len(results), "ok": len(ok), "wall_s": round(wall_s, 3),
+        "tokens": sorted({r.tokens for r in ok}),             # should be just max_tokens
+        "decode_tok_s": {f"p{q}": rnd(percentile(decode, q)) for q in (10, 50, 90)},
+        "ttft_s": {f"p{q}": rnd(percentile([r.ttft_s for r in ok], q)) for q in (50, 95)},
+        "itl_s": {f"p{q}": rnd(percentile([x for r in ok for x in r.itl_s], q)) for q in (50, 99)},
+        "errors": sorted({r.error for r in results if r.error})[:5],
+    }
+    if weight_bytes and decode:
+        s["ceiling_tok_s"] = round(BANDWIDTH / weight_bytes, 1)
+        s["pct_of_ceiling"] = round(100 * s["decode_tok_s"]["p50"] / s["ceiling_tok_s"], 1)
+    return s
+
+
 def rated_load(summaries: list[dict]) -> float | None:
     """Highest rate such that it and every lower rate meet all SLOs (None if the lowest fails)."""
     best = None
@@ -184,6 +212,19 @@ async def run(args) -> dict:
             w = await one_request(client, body_for(i), 0.0)
             if w.status != 200:
                 raise SystemExit(f"warmup request failed: {w.status} {w.error}")
+        if args.sequential:
+            t0 = time.perf_counter()
+            results = [await one_request(client, body_for(i), time.perf_counter() - t0)
+                       for i in range(args.sequential)]
+            s = summarize_sequential(results, time.perf_counter() - t0, args.weight_bytes)
+            d = s["decode_tok_s"]
+            print(f"sequential x{s['sent']} | ok {s['ok']} tokens {s['tokens']} | decode tok/s p10 "
+                  f"{d['p10']} p50 {d['p50']} p90 {d['p90']} | TTFT p50 {_ms(s['ttft_s']['p50'])} | "
+                  f"ITL p50 {_ms(s['itl_s']['p50'])} p99 {_ms(s['itl_s']['p99'])}"
+                  + (f" | {s['pct_of_ceiling']}% of {s['ceiling_tok_s']} tok/s ceiling"
+                     if "pct_of_ceiling" in s else ""), flush=True)
+            return {"model": model, "sequential": s,
+                    "requests": [asdict(r) for r in results] if args.keep_requests else None}
         rng = random.Random(args.seed)
         ttft_slo = SLO_TTFT_P95_S[args.slo]
         rows = []
@@ -213,6 +254,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--model", default=None, help="model name in requests; default: first of /v1/models")
     ap.add_argument("--rates", type=lambda s: [float(x) for x in s.split(",")], default=[1, 2, 4, 8],
                     help="requests/s, comma-separated")
+    ap.add_argument("--sequential", type=int, default=0, metavar="N",
+                    help="instead of the rate sweep: N requests one at a time (B=1 decode speed)")
+    ap.add_argument("--weight-bytes", type=float, default=None,
+                    help="stored weight bytes, for the %% of the bandwidth ceiling in --sequential")
     ap.add_argument("--duration", type=float, default=60.0, help="seconds of arrivals per rate")
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--temperature", type=float, default=0.0)
@@ -231,9 +276,11 @@ def main(argv: list[str] | None = None) -> None:
     from tinyllm.provenance import Provenance                 # imports torch: keep it out of the client path
     prov = Provenance(power_mode=args.power_mode, url=args.url).start()
     out = asyncio.run(run(args))
-    print(f"rated load (all SLOs met at it and below): {out['rated_load_rps']} req/s")
+    if not args.sequential:
+        print(f"rated load (all SLOs met at it and below): {out['rated_load_rps']} req/s")
     record = {"workload": {k: getattr(args, k) for k in ("rates", "duration", "max_tokens", "temperature",
-                                                         "warmup", "seed", "slo", "prompts")},
+                                                         "warmup", "seed", "slo", "prompts", "sequential",
+                                                         "weight_bytes")},
               "slo": {"ttft_p95_s": SLO_TTFT_P95_S[args.slo], "availability": SLO_AVAILABILITY,
                       "shed_max": SLO_SHED_MAX},
               "provenance": prov.finish(), **out}

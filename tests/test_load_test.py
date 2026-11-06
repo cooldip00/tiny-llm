@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from load_test import Result, main, poisson_arrivals, rated_load, summarize  # noqa: E402
+from load_test import (BANDWIDTH, Result, main, poisson_arrivals, rated_load, summarize,  # noqa: E402
+                       summarize_sequential)
 from test_server import model, serve  # noqa: E402, F401  (model is a fixture)
 
 from tinyllm.server import Faults  # noqa: E402
@@ -64,3 +65,32 @@ def test_load_test_against_our_server(model, tmp_path):
     assert rec["rated_load_rps"] == 2.0
     req = rec["rows"][0]["requests"][0]
     assert req["status"] == 200 and req["tokens"] == 8 and len(req["itl_s"]) >= 1
+
+
+def test_sequential_summary_excludes_prefill():
+    # 11 tokens: first at 0.5 s (prefill), last at 1.5 s -> 10 decode tokens in 1 s
+    rs = [Result(0.0, 200, ttft_s=0.5, latency_s=1.5, tokens=11, itl_s=[0.1] * 10),
+          Result(0.0, 200, ttft_s=0.1, latency_s=0.6, tokens=11, itl_s=[0.05] * 10),   # 20 tok/s
+          Result(0.0, 503, error="busy")]
+    s = summarize_sequential(rs, wall_s=2.1, weight_bytes=BANDWIDTH / 40)            # ceiling 40 tok/s
+    assert (s["sent"], s["ok"], s["tokens"], s["errors"]) == (3, 2, [11], ["busy"])
+    assert s["decode_tok_s"]["p50"] == pytest.approx(15.0) and s["ceiling_tok_s"] == 40.0
+    assert s["pct_of_ceiling"] == pytest.approx(37.5)
+    assert "pct_of_ceiling" not in summarize_sequential(rs, 2.1, None)
+
+
+def test_sequential_mode_against_our_server(model, tmp_path):
+    out, prompts = tmp_path / "seq.json", tmp_path / "prompts.txt"
+    prompts.write_text("once upon\nthe dog\n")                 # the tiny model's context is 48
+    with serve(model, n_slots=2, faults=Faults(step_delay_s=0.01)) as s:
+        main(["--url", s.url, "--sequential", "3", "--max-tokens", "6", "--warmup", "1", "--prompts", str(prompts),
+              "--power-mode", "test", "--weight-bytes", "4.23e9", "--out", str(out), "--keep-requests"])
+    rec = json.loads(out.read_text())
+    seq = rec["sequential"]
+    assert seq["sent"] == seq["ok"] == 3 and seq["tokens"] == [6] and "rows" not in rec
+    # a 0.01 s delay per engine step -> roughly 100 tok/s; the ceiling is set to 100 tok/s
+    assert 0 < seq["decode_tok_s"]["p50"] < 150 and seq["ceiling_tok_s"] == 100.0
+    assert seq["pct_of_ceiling"] == pytest.approx(seq["decode_tok_s"]["p50"], abs=0.1)
+    assert rec["workload"]["sequential"] == 3 and len(rec["requests"]) == 3
+    sent = [r["sent_s"] for r in rec["requests"]]
+    assert sent == sorted(sent) and all(b - a >= r["latency_s"] for a, b, r in zip(sent, sent[1:], rec["requests"]))
