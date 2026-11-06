@@ -20,6 +20,17 @@
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
 
+### 2026-11-06 — Serving design: production layer, observability, release strategies (D-028)
+- Design discussion before 4.13 step 2. Recorded in **D-028**, **[docs/SERVING.md](docs/SERVING.md)**, PLAN 4.13 / 6.5b / 6.9 and PARKING_LOT.
+- What is deployed:
+  - TinyLlama 1.1B on the local server, for load tests and 4.8a
+  - our 30M model on the public CPU Space, framed as story continuation (TinyStories base model, no SFT / RLHF)
+- 4.13 step 2 now also includes per-request sampling, hardening (429 queue limit, rate limit, timeouts, disconnect → abort, drain), an observability core (JSON request log, request ids, `/stats`, `/metrics`, debug mode) and a one-variant router with `X-Model-Version`. 4.13 is now ~11–13 h.
+- 6.5b adds a status page, an SLO, private log retention, a usage report, a privacy notice and the scaling write-up (+2–3 h).
+- New 6.9 (v1.1, ~11-19 → 11-21): blue-green, shadow, canary with auto-rollback, A/B.
+- v1 date unchanged (~11-18).
+- Next: 4.13 step 2.
+
 ### 2026-11-06 — 4.13 step 1: `ContinuousEngine`
 - `engine.py`: `run_continuous`'s loop is now `ContinuousEngine` with `add_request()` (any time; returns an id; rejects requests that can never fit), `step()` (admit + one decode step; returns the new tokens as `Event(rid, token, done)`), `abort()` (frees the slot or drops the queued request) and `results` (popped by the caller). `run_continuous` is a thin wrapper, so every 4.4 / 4.5 / 4.11b test checks the refactor unchanged.
 - TTFT and latency now count from each request's arrival. With all requests added at t=0 they equal the old numbers.

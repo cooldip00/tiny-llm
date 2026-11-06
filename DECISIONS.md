@@ -262,3 +262,43 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - 4.13 first: its first load test would be eager and go stale a day later. Also, the engine refactor would not reduce the graph work.
   - Skipping it until after v1: the vLLM serving comparison would mostly measure launch overhead.
   - Paged graphs first: block tables add work, and the slot cache already gives the measurement.
+
+### D-028 — Serving as a production service: hardening + observability in 4.13 / 6.5b, release strategies in v1.1 · ACCEPTED (2026-11-06). Extends D-025's 4.13 scope; full design in docs/SERVING.md
+- **Context:**
+  - 4.13 as planned is an API over the engine plus a load test. It doesn't say what happens when the queue is full, a client disconnects or the engine fails. There is also no way to see how the public Space is used or how fast it answers.
+  - Interviews for inference / ML-platform roles ask about evaluation under load, observability and release strategies (shadow, canary, A/B), not only kernels.
+  - We have one laptop GPU and one free CPU Space: no fleet, no load balancer, no hosted monitoring stack.
+  - Deployment: TinyLlama 1.1B on the local server (load tests, 4.8a); our 30M model on the public Space. The 30M model is a TinyStories base model (no SFT / RLHF), so the demo is story continuation via `/v1/completions`.
+- **Choice:**
+  - **4.13 step 2 (v1):**
+    - the server: `POST /v1/completions` with streaming
+    - per-request sampling
+    - hardening: `/health`, `/ready`, a bounded queue → 429, a per-client rate limit, timeouts, abort on disconnect, graceful shutdown, engine errors → 500
+    - observability core: a JSON request log, `X-Request-ID`, engine snapshots, `/stats` and `/metrics` (Prometheus text format), debug mode
+    - a `Router` with one variant, and `X-Model-Version` logged from day one
+  - **4.13 step 3 (v1):** a load generator reporting TTFT and inter-token latency p50 / p99, throughput vs rate, and goodput at an SLO.
+  - **6.5b (v1):**
+    - the Space runs the same FastAPI server, with the demo page mounted on it
+    - a status page with charts and an SLO
+    - logs kept in a private HF dataset
+    - `scripts/analyze_logs.py`
+    - a privacy notice
+    - a written scaling design
+  - **Privacy:** metadata only, never prompt or completion text; salted IP hashes, never raw IPs; private log dataset; notice on the Space.
+  - **New step 6.9 (v1.1, ~11-19 → 11-21, ~9–10 h):** blue-green, shadow, canary with auto-rollback, A/B with statistics, and a promotion pipeline, built on the router.
+  - **Cost:** 4.13 grows to ~11–13 h (+3–3.5 h), 6.5b +2–3 h. v1 stays ~11-18. If late, cut first the status-page charts, then the usage report.
+- **Why:**
+  - Each piece imitates a production practice at single-service scale, in the real format where one exists (Prometheus text, OpenAI API, SSE). So it can be explained the same way as the real thing.
+  - The router and `model_version` fields cost minutes now and make every release strategy a routing rule later, with no server rewrite.
+  - Release strategies need a working, observed server first, and they aren't needed for v1's claims. So they go right after v1 instead of delaying it.
+- **Expected limits:**
+  - A/B can't reach significance on a personal Space's traffic. We show the mechanism, validate it with simulated users, and report the sample size a real verdict would need.
+  - On one machine, shadow traffic competes with live traffic. It runs only when the queue is idle, and its impact is measured.
+  - Two TinyLlama copies for blue-green may not fit the laptop's VRAM. Use the 30M model there if so.
+  - Scaling beyond one server is a write-up, not a build.
+- **Rejected:**
+  - Running Prometheus + Grafana (or a hosted APM): infrastructure to operate, not something we build. `/metrics` stays scrape-compatible instead.
+  - Everything, release strategies included, in v1: +9–10 h would move v1.
+  - Greedy-only server: a public demo needs temperature / top-p, and per-request settings are cheap once rows are grouped.
+  - Logging prompt text for debugging: a privacy risk for little gain. Timings and token counts explain performance problems.
+  - Exposing the laptop server publicly (tunnel): a security risk, and the Space already is the public endpoint.

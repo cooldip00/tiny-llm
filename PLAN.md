@@ -93,6 +93,17 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
   - `POST /v1/completions` takes token ids or text, with optional streaming.
   - Load generator: Poisson arrivals, reporting TTFT, inter-token latency and throughput. It is also the client for 4.8a (vLLM serves the same API).
   - Done when served outputs equal `generate()` for greedy requests, and the load test runs against both our server and vLLM. **v1, before 4.8a.**
+  - Scope extended by D-028 (2026-11-06; design in [docs/SERVING.md](docs/SERVING.md)). Estimate now ~11–13 h in total.
+  - [x] Step 1: `ContinuousEngine` (`add_request` / `step` / `abort`). _Done 2026-11-06, 239 passed._
+  - [ ] Step 2: the server (`src/tinyllm/server.py`, `src/tinyllm/obs.py`; adds fastapi, uvicorn, httpx):
+    - `POST /v1/completions`: text or token ids, `max_tokens`, `temperature`, `top_p`, `top_k`, `ignore_eos`, SSE streaming ending with `[DONE]`, `finish_reason`, `usage`
+    - per-request sampling, with rows grouped by identical settings
+    - hardening: `/health`, `/ready`, a bounded queue → 429 + `Retry-After`, a per-client rate limit, a per-request timeout, abort on client disconnect, graceful shutdown (drain), an engine error → 500 + not ready
+    - observability core: a JSON request log line (queue wait, TTFT, inter-token p50 / p95, tokens, finish reason, load at arrival), `X-Request-ID`, engine snapshots every ~5 s, `/stats` (5 min / 1 h windows), `/metrics` (Prometheus text format), `--log-level debug` with per-step timings and slow-request timelines, `/debug/state` (localhost only)
+    - a `Router` with one variant; `X-Model-Version` (checkpoint hash + git commit) on every response and in every log line
+    - CLI: `python -m tinyllm.server --model tinyllama | --ckpt PATH --slots 8 --cuda-graph`
+    - Done when: greedy served outputs equal `generate()`, streamed tokens equal the non-streamed ones, and tests cover 429 on a full queue, the rate limit, timeout, disconnect → slot freed, shutdown mid-request, and the metrics / log fields.
+  - [ ] Step 3: the load generator (`scripts/load_test.py`): Poisson arrivals over a range of rates. Reports TTFT and inter-token p50 / p99, throughput vs rate, goodput at a latency SLO, and 429s / queue wait past capacity. The same client is used against vLLM in 4.8a.
 
 ### Track B — Real-scale inference (D-015, D-016)
 - [ ] 4.9 TinyLlama 1.1B in our engine
@@ -133,6 +144,15 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [ ] 6.5 Publish (added by D-021), in this order:
   - [ ] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1)._
   - [ ] 6.5b Hugging Face: our model with a model card, plus a small Gradio Space demo
+    - _D-028 (2026-11-06; design in [docs/SERVING.md](docs/SERVING.md)), about +2–3 h:_
+      - The Space runs our FastAPI server (same code as 4.13) with the demo page mounted on it. The 30M model is framed as story continuation (a TinyStories base model), with example openings.
+      - A status page with live charts from `/stats` (requests / min, latency, queue depth).
+      - An SLO (e.g. 95% of TTFT under 2 s), with compliance shown on the status page.
+      - Logs kept in a private HF dataset (`CommitScheduler`, ~10 min).
+      - `scripts/analyze_logs.py` usage report.
+      - A privacy notice: metadata only, salted IP hashes.
+      - A written scaling design: replicas, routing, autoscaling on queue depth.
+      - If late, cut first the status-page charts, then the usage report.
   - [ ] 6.5c W&B project set to public; link the training curves from the README
   - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume
   - [ ] 6.5e LinkedIn: three posts, one per milestone (training done → KV cache + paged KV → TinyLlama results)
@@ -142,6 +162,13 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 
 - [x] 6.7 CI (D-025): GitHub Actions runs the CPU test suite on every push, with a status badge in the README. **Before 6.5a (v1-preview).** _Done 2026-11-05: workflow green; the badge is in the first README._
 - [ ] 6.8 One command regenerates every results table (D-025): `scripts/bench_all.py` runs each benchmark script and writes the INFERENCE.md tables from `runs/bench/*.json`, so the README numbers can be reproduced from the repo. Part of 6.1, v1.
+- [ ] 6.9 Release strategies (D-028, **v1.1**, after v1: ~11-19 → 11-21, ~9–10 h; design in [docs/SERVING.md](docs/SERVING.md)), built on 4.13's `Router`:
+  - blue-green: two engines loaded, an admin switch, drain, instant rollback (~2 h)
+  - shadow: mirror 10–20% of traffic when the live queue is idle; a report on token agreement, the latency difference and the impact on live latency (~2–3 h)
+  - canary: a weighted router (5% → 25% → 100%), automatic rollback on error rate or SLO vs live, demonstrated with the load generator and a deliberately degraded variant (~2 h)
+  - A/B: sticky assignment by hashed client id, thumbs up / down, a significance test and CIs, validated with simulated users, plus the sample size a real verdict needs (~3 h)
+  - variant id = checkpoint hash + git commit
+  - a written promotion pipeline: offline gate → shadow → canary → live
 
 **Done when (6.5–6.6):** the repo is public with results, at least one post is live, and every resume bullet is backed by a number in PROGRESS.md.
 
@@ -199,6 +226,7 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-09 → 11-11 | 6.7 CI; first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
 | 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; rest of Phase 6 → **v1** |
 | If ahead | 4.7 prompt-lookup decoding, 4.10 Triton |
+| 2026-11-19 → 11-21 | 6.9 release strategies (D-028) → **v1.1** |
 | After v1 | Phase 5, Phase 7 |
 
 Every day: ~30 min explaining that day's work out loud (feeds 6.6).
