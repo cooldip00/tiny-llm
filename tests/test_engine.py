@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from tinyllm.config import ModelConfig
-from tinyllm.engine import ContinuousEngine, Request, prefill_padded, run_continuous, run_static
+from tinyllm.engine import (ContinuousEngine, Request, Sampling, prefill_padded, run_continuous,
+                            run_static)
 from tinyllm.generate import generate
 from tinyllm.kv_cache import KVCache, SlotKVCache
 from tinyllm.model import Transformer
@@ -220,3 +221,57 @@ def test_engine_late_arrivals_graph_equals_eager(model):
         rids, _ = drive(eng, reqs, arrive_at)
         out[graph] = [eng.results[r].tokens for r in rids]
     assert out[True] == out[False]
+
+
+# -- 4.13 step 2: per-request sampling ---------------------------------------------------
+
+HOT = Sampling(temperature=5.0)                     # far from greedy on this model
+HOT_TOP1 = Sampling(temperature=5.0, top_k=1)       # sampled, but only the argmax survives
+
+
+def run_mixed(model, reqs, arrive_at, seed):
+    eng = ContinuousEngine(model, n_slots=3, generator=torch.Generator().manual_seed(seed))
+    rids, _ = drive(eng, reqs, arrive_at)
+    return [eng.results.pop(r).tokens for r in rids]
+
+
+def test_engine_per_request_sampling_rows_get_their_own_settings(model):
+    base = make_requests(n=9, seed=7)
+    kinds = [None, HOT, HOT_TOP1] * 3                # greedy / hot / hot top-1, mixed in each step
+    reqs = [Request(r.prompt, r.max_new_tokens, sampling=s) for r, s in zip(base, kinds)]
+    arrive_at = [0, 0, 0, 1, 2, 4, 6, 6, 9]
+    out = run_mixed(model, reqs, arrive_at, seed=0)
+    for r, toks in zip(reqs, out):
+        assert len(toks) == r.max_new_tokens and all(0 <= t < CFG.vocab_size for t in toks)
+        if r.sampling is not HOT:                    # greedy and top-1 rows are deterministic
+            assert toks == solo(model, r)
+    assert any(toks != solo(model, r) for r, toks in zip(reqs, out) if r.sampling is HOT)
+    assert out == run_mixed(model, reqs, arrive_at, seed=0)        # same seed, same tokens
+
+
+def test_engine_request_sampling_equal_to_default_is_one_group(model):
+    """A request whose settings equal the engine's must sample exactly as without them
+    (same group, same RNG use)."""
+    base = make_requests(n=6, seed=8)
+    out = []
+    for explicit in (False, True):
+        reqs = [Request(r.prompt, r.max_new_tokens, sampling=HOT if explicit else None) for r in base]
+        eng = ContinuousEngine(model, n_slots=3, temperature=5.0,
+                               generator=torch.Generator().manual_seed(1))
+        rids = [eng.add_request(r) for r in reqs]
+        while eng.has_work():
+            eng.step()
+        out.append([eng.results[r].tokens for r in rids])
+    assert out[0] == out[1]
+
+
+@pytest.mark.parametrize("bad", [dict(temperature=-1.0), dict(temperature=float("nan")),
+                                 dict(top_k=0), dict(top_p=0.0), dict(top_p=1.5)])
+def test_sampling_rejects_bad_settings(bad):
+    with pytest.raises(ValueError):
+        Sampling(**bad)
+
+
+def test_static_rejects_per_request_sampling(model):
+    with pytest.raises(ValueError, match="per-request"):
+        run_static(model, [Request([1, 2], 3, sampling=HOT)], batch_size=1)

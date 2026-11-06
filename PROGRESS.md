@@ -20,6 +20,20 @@
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
 
+### 2026-11-06 — 4.13 step 2, part 1: per-request sampling
+- `engine.py`:
+  - New frozen `Sampling(temperature, top_k, top_p)`, which checks its own values.
+  - New `Request.sampling` (None = the engine's settings).
+  - `ContinuousEngine._sample` makes one `sample_next` call per distinct setting. When every row has the same settings, the result and RNG use are exactly as before. Idle decode rows use the engine default.
+  - `run_static` rejects per-request settings instead of ignoring them.
+- New tests:
+  - greedy and `top_k=1` rows mixed with hot sampled rows (staggered arrivals) equal solo `generate()`
+  - hot rows do differ, and the same seed gives the same tokens
+  - explicit settings equal to the engine's sample exactly as without them
+  - bad settings are rejected
+- Full suite **247 passed**.
+- Next: part 2, `obs.py`.
+
 ### 2026-11-06 — Serving design: production layer, observability, release strategies (D-028)
 - Design discussion before 4.13 step 2. Recorded in **D-028**, **[docs/SERVING.md](docs/SERVING.md)**, PLAN 4.13 / 6.5b / 6.9 and PARKING_LOT.
 - What is deployed:

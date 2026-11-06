@@ -27,11 +27,28 @@ from tinyllm.kv_cache import KVCache, SlotKVCache
 from tinyllm.model import Transformer
 
 
+@dataclass(frozen=True)
+class Sampling:
+    """How to pick tokens (sample_next's settings). Frozen, so equal settings group together."""
+    temperature: float = 0.0             # 0 = greedy
+    top_k: int | None = None
+    top_p: float | None = None
+
+    def __post_init__(self):
+        if not self.temperature >= 0:
+            raise ValueError(f"temperature must be >= 0, got {self.temperature}")
+        if self.top_k is not None and self.top_k < 1:
+            raise ValueError(f"top_k must be >= 1, got {self.top_k}")
+        if self.top_p is not None and not 0.0 < self.top_p <= 1.0:
+            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}")
+
+
 @dataclass
 class Request:
     prompt: list[int]
     max_new_tokens: int
     eos_id: int | None = None
+    sampling: Sampling | None = None     # ContinuousEngine only; None = the engine's settings
 
 
 @dataclass
@@ -114,6 +131,8 @@ def _done(req: Request, toks: list[int]) -> bool:
 def run_static(model: Transformer, requests: list[Request], batch_size: int,
                temperature: float = 0.0, top_k=None, top_p=None, generator=None,
                ) -> tuple[list[Result], dict]:
+    if any(r.sampling is not None for r in requests):
+        raise ValueError("run_static uses one sampling setting; per-request sampling needs ContinuousEngine")
     model.eval()
     device = next(model.parameters()).device
     pick = dict(temperature=temperature, top_k=top_k, top_p=top_p, generator=generator)
@@ -177,8 +196,10 @@ class ContinuousEngine:
 
     Times are seconds on the engine clock (since construction). TTFT and latency count from
     the request's arrival, so with every request added at once they match 4.4's numbers.
-    Sampling settings are per engine. Not thread-safe: call add_request / step / abort from
-    one thread.
+    Sampling: the engine's settings are the default; a request's `sampling` overrides them.
+    Rows with equal settings are sampled in one call, so when every row uses the same
+    settings the result (and RNG use) is exactly as with per-engine settings. One generator
+    is shared by all rows. Not thread-safe: call add_request / step / abort from one thread.
 
     kv="slots": SlotKVCache, every slot reserves max_len positions (4.4).
     kv="paged": PagedKVCache with kv_blocks blocks of block_size tokens (4.5). Default
@@ -199,7 +220,8 @@ class ContinuousEngine:
         self.device = device = next(model.parameters()).device
         self.n_slots = n_slots
         self.max_len = max_len = max_len or cfg.max_seq_len
-        self.pick = dict(temperature=temperature, top_k=top_k, top_p=top_p, generator=generator)
+        self.sampling = Sampling(temperature, top_k, top_p)    # the default for every request
+        self.generator = generator
         dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
         if cuda_graph is not False and kv != "slots":
             raise ValueError("cuda_graph supports kv='slots' only (paged: not yet)")
@@ -291,7 +313,7 @@ class ContinuousEngine:
             prompts = [self._context(r) for r in rids]
             L = max(len(p) for p in prompts)
             logits, pre, pad = prefill_padded(self.model, prompts, max_len=L)
-            nxt = sample_next(logits, **self.pick)
+            nxt = self._sample(logits, [self._sampling(r) for r in rids])
             taken = free[:len(rids)]
             slots.admit(taken, pre, pad)
             self._last_tok[torch.tensor(taken, device=self.device)] = nxt
@@ -321,7 +343,8 @@ class ContinuousEngine:
         else:
             with _autocast(self.device):
                 logits, _ = self.model(self._last_tok, cache=slots)   # one token per slot
-        self._last_tok = sample_next(logits[:, -1], **self.pick)
+        rows = [self._sampling(r) if r is not None else self.sampling for r in self._slot_req]
+        self._last_tok = self._sample(logits[:, -1], rows)    # idle rows: engine default
         toks = self._last_tok.squeeze(-1).tolist()
         now = self.now()
         for s in live:
@@ -332,6 +355,24 @@ class ContinuousEngine:
     def _context(self, rid: int) -> list[int]:
         """Prompt plus tokens generated so far (non-empty only after a preemption)."""
         return self._req[rid].prompt + self._outs.get(rid, [])
+
+    def _sampling(self, rid: int) -> Sampling:
+        return self._req[rid].sampling or self.sampling
+
+    def _sample(self, logits: Tensor, rows: list[Sampling]) -> Tensor:
+        """Next token per row (B, V) → (B, 1), each row with its own settings. One
+        sample_next call per distinct setting, in order of first appearance."""
+        groups: dict[Sampling, list[int]] = {}
+        for i, s in enumerate(rows):
+            groups.setdefault(s, []).append(i)
+        if len(groups) == 1:
+            (s,) = groups
+            return sample_next(logits, s.temperature, s.top_k, s.top_p, self.generator)
+        out = torch.empty(logits.size(0), 1, dtype=torch.long, device=logits.device)
+        for s, idx in groups.items():
+            ix = torch.tensor(idx, device=logits.device)
+            out[ix] = sample_next(logits[ix], s.temperature, s.top_k, s.top_p, self.generator)
+        return out
 
     def _left(self, rid: int) -> int:
         return self._req[rid].max_new_tokens - len(self._outs.get(rid, []))
