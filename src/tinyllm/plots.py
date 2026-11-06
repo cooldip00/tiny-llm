@@ -249,9 +249,13 @@ def load_sweep(load: dict) -> Figure:
             i = len(rate) - 2
             left.annotate(f"{shed[i] * 100:.0f}–{shed[-1]:.0%} rejected\nwith a 429", (rate[-1], done[-1]), xytext=(0, 9),
                           textcoords="offset points", ha="right", va="bottom", fontsize=8.5)
-        right.annotate(f"{name} {ttft[-1]:.0f} s" if ttft[-1] >= 10 else f"{name} {ttft[-1]:.1f} s",
-                       (rate[-1], ttft[-1]), xytext=(7, 0), textcoords="offset points", va="center", fontsize=9,
-                       annotation_clip=False)
+        end = f"{name} {ttft[-1]:.0f} s" if ttft[-1] >= 10 else f"{name} {ttft[-1]:.1f} s"
+        if shed[-1] > 0:        # flat because the bounded queue rejects, not because the engine is faster
+            right.annotate(end + ": capped;\na full queue answers\nnew requests with a 429", (rate[-1], ttft[-1]),
+                           xytext=(7, 6), textcoords="offset points", va="top", fontsize=9, annotation_clip=False)
+        else:
+            right.annotate(end, (rate[-1], ttft[-1]), xytext=(7, 0), textcoords="offset points", va="center",
+                           fontsize=9, annotation_clip=False)
     for ax in (left, right):
         ax.set_xlim(0, top * 1.04)
         ax.xaxis.set_major_locator(FixedLocator([0, 4, 8, 12, 16]))
@@ -264,7 +268,7 @@ def load_sweep(load: dict) -> Figure:
     right.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g} s"))
     right.yaxis.set_minor_locator(NullLocator())
     right.set_ylim(0.02, max(max(t) for _, _, t, _ in eng.values()) * 2)
-    right.set_title("Time to first token, p95 (log scale)", loc="left", fontsize=10, color=INK)
+    right.set_title("Time to first token p95, served requests", loc="left", fontsize=10, color=INK)
     w = load["workload"]
     _head(left, "TinyLlama 1.1B under load: 8 sequences per engine",
           f"Poisson arrivals, {w['max_tokens']} new tokens per request, {w['duration']:.0f} s per rate. Past capacity "

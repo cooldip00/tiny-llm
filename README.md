@@ -67,7 +67,7 @@ TinyLlama 1.1B in bf16. All three engines serve the same OpenAI-compatible API t
 | vLLM 0.33, default | 256 | 161 (84%) | 32 req/s | ~34 req/s, ~4,370 tok/s | TTFT p95 21 s at 48 req/s |
 | llama.cpp (bf16 GGUF) | 8 | 151 (79%) | 4 req/s | peaks at 5.4 req/s, then **falls** to 3.5 | TTFT p95 203 s at 16 req/s |
 
-![Two line charts, TinyLlama 1.1B with 8 sequences per engine, offered load 0.5 to 16 requests/s. Left, completed requests/s at 16 offered: vLLM 8.5; ours 5.5, with 46–62% of requests rejected with a 429 past 12 offered; llama.cpp 3.5, after a peak of 5.4. Right, time to first token p95 at 16 offered on a log scale: llama.cpp 203 s, vLLM 48 s, ours 5.9 s, against an SLO of 1 s](docs/img/load_sweep.svg)
+![Two line charts, TinyLlama 1.1B with 8 sequences per engine, offered load 0.5 to 16 requests/s. Left, completed requests/s at 16 offered: vLLM 8.5; ours 5.5, with 46–62% of requests rejected with a 429 past 12 offered; llama.cpp 3.5, after a peak of 5.4. Right, time to first token p95 of served requests at 16 offered, on a log scale: llama.cpp 203 s, vLLM 48 s, ours 5.9 s, flat from 6 offered because a full queue answers new requests with a 429; SLO 1 s](docs/img/load_sweep.svg)
 
 - **One stream:** vLLM is 1.44× faster and llama.cpp 1.35×. vLLM uses FlashAttention and fused kernels; we use PyTorch SDPA over padded slots and capture only the decode step as a graph.
 - **Under load, seats set the capacity:** with 8 seats each we hold the same load as llama.cpp (4 req/s within SLO). vLLM's default admits 256 sequences into a paged KV pool, which is why it holds 32 req/s.
