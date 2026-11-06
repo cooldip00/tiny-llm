@@ -6,6 +6,8 @@ Status keys: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped (say
 
 Each phase ends with **Done when** checks. Don't start the next phase until they pass.
 
+**Every step's done-when also includes (2026-11-06):** the README is updated if the step changes what a reader would see: a new module, doc, result, feature or command. `tests/test_readme.py` checks that the README names every module and links every doc; results and features are checked by hand. _Added after the README missed the server (4.13), the HF export (4.8b) and the vLLM / llama.cpp comparison (4.8a)._
+
 ---
 
 ## Phase 0 — Environment

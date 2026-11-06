@@ -13,8 +13,9 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 - **Serving:** continuous batching gives 1.38× static batching. A paged KV cache fits 25 sequences where contiguous slots fit 8, for 1.62× the throughput in the same memory.
 <!-- /bench:highlights -->
 - **Training:** a 30M-parameter model on ~1B TinyStories tokens in 2 h 27 min at **56% MFU**.
+- **HTTP server:** OpenAI-compatible, with streaming. Past capacity it rejects requests with a 429, so time to first token stays bounded, where vLLM's and llama.cpp's grow with the queue ([vs vLLM and llama.cpp](#results-vs-vllm-and-llamacpp)).
 
-> Status: **v1-preview**. Still to come: comparisons with vLLM and llama.cpp, a fused INT8 kernel, and an attention ablation (see [Roadmap](#roadmap)).
+> Status: **v1-preview**. Still to come: a fused INT8 kernel, CUDA graphs for the paged engine, and an attention ablation (see [Roadmap](#roadmap)).
 
 ## Results: TinyLlama 1.1B inference
 
@@ -54,6 +55,25 @@ Full tables from the same run, with GPU clocks and temperatures: [docs/RESULTS.m
 The paged cache stores KV in fixed-size blocks through a per-sequence block table, as in vLLM, so a sequence holds only the blocks it has filled. The share of reserved KV holding real tokens goes from 52% to 97%.
 <!-- /bench:serving -->
 
+## Results: vs vLLM and llama.cpp
+
+TinyLlama 1.1B in bf16. All three engines serve the same OpenAI-compatible API to the same load-test client (`scripts/load_test.py`): 14-token prompts, 128 new tokens per request, Poisson arrivals, prefix caching off. "Within SLO" is the highest request rate with TTFT p95 ≤ 1 s. Full table, method and caveats: [docs/SERVING.md](docs/SERVING.md).
+
+| Engine | Seats | One stream, tok/s (% of ceiling) | Within SLO | Saturation | Past saturation |
+|---|---|---|---|---|---|
+| **Ours** (continuous batching + CUDA graphs) | 8 | 112 (58%) | 4 req/s | ~5.5 req/s, ~710 tok/s | sheds load with 429s; the 32-place queue caps TTFT p95 at ~5.9 s |
+| **Ours** | 32 | (same engine) | 8 req/s | ≥ 12.2 req/s, 1,555 tok/s | 429s; TTFT p95 2.6–2.9 s |
+| vLLM 0.33 | 8 | 161 (84%) | 6 req/s | ~8.5 req/s, ~1,090 tok/s | queues without limit; TTFT p95 48 s at 16 req/s |
+| vLLM 0.33, default | 256 | 161 (84%) | 32 req/s | ~34 req/s, ~4,370 tok/s | TTFT p95 21 s at 48 req/s |
+| llama.cpp (bf16 GGUF) | 8 | 151 (79%) | 4 req/s | peaks at 5.4 req/s, then **falls** to 3.5 | TTFT p95 203 s at 16 req/s |
+
+![Two line charts, TinyLlama 1.1B with 8 sequences per engine, offered load 0.5 to 16 requests/s. Left, completed requests/s at 16 offered: vLLM 8.5; ours 5.5, with 46–62% of requests rejected with a 429 past 12 offered; llama.cpp 3.5, after a peak of 5.4. Right, time to first token p95 at 16 offered on a log scale: llama.cpp 203 s, vLLM 48 s, ours 5.9 s, against an SLO of 1 s](docs/img/load_sweep.svg)
+
+- **One stream:** vLLM is 1.44× faster and llama.cpp 1.35×. vLLM uses FlashAttention and fused kernels; we use PyTorch SDPA over padded slots and capture only the decode step as a graph.
+- **Under load, seats set the capacity:** with 8 seats each we hold the same load as llama.cpp (4 req/s within SLO). vLLM's default admits 256 sequences into a paged KV pool, which is why it holds 32 req/s.
+- **Past saturation:** we reject with 429s and keep latency bounded; vLLM and llama.cpp queue, and latency grows with the backlog.
+- **Caveats:** one session on 2026-11-06, separate from the tables above, with the GPU thermally throttled in every run (84–87 °C), so differences under ~15% are ties. Our one-stream number here (112 tok/s) goes through the HTTP server with streaming; the 127 tok/s above is the engine alone.
+
 ## Results: training
 
 | | |
@@ -63,6 +83,7 @@ The paged cache stores KV in fixed-size blocks through a per-sequence block tabl
 | Time | 2 h 27 min on the laptop GPU |
 | Throughput | 115K tok/s, **56% MFU** (torch.compile: +57% over eager) |
 | Final val loss | 1.2825 (train 1.280: no overfitting) |
+| Export | Hugging Face Llama format (`scripts/export_hf.py`): HF Transformers' logits match ours to 1.4e-5, and the exported tokenizer gives identical ids on all 21,981 validation stories |
 
 ![Line chart: training and validation loss of the 30M model over 996M tokens, falling from 9.0 to a final validation loss of 1.2825, with train and validation loss close together throughout](docs/img/train_loss.svg)
 
@@ -99,21 +120,24 @@ flowchart LR
 - **Continuous batching:** a finished sequence leaves the batch at once, and a waiting request takes its place, instead of the whole batch waiting for its longest member.
 - **Paged KV:** when memory runs out, the newest sequence is preempted and recomputed later (vLLM's default policy).
 - **CUDA graphs:** the whole decode step is recorded once and replayed, so the CPU launches one graph instead of hundreds of kernels.
+- **HTTP server:** the engine runs in its own thread behind a FastAPI app that serves an OpenAI-compatible `/v1/completions`, streamed or not. When its queue is full it answers 429 instead of slowing everyone down; `/health`, `/ready` and Prometheus `/metrics` report its state ([docs/SERVING.md](docs/SERVING.md)).
 
 ## Repository layout
 
 | Path | What's there |
 |---|---|
 | `src/tinyllm/model.py`, `attention/`, `config.py` | The transformer, swappable attention, model configs |
-| `src/tinyllm/train.py`, `data.py`, `tokenizer.py` | Training loop (bf16, torch.compile, MFU logging), data loading, BPE tokenizer |
+| `src/tinyllm/train.py`, `data.py`, `tokenizer.py`, `logger.py` | Training loop (bf16, torch.compile, MFU logging), data loading, BPE tokenizer, W&B logging |
 | `src/tinyllm/generate.py`, `kv_cache.py` | Naive and KV-cached generation |
 | `src/tinyllm/engine.py`, `paged_kv.py` | Static and continuous batching; paged KV cache with a block allocator |
 | `src/tinyllm/cuda_graph.py` | Decode step captured as a CUDA graph |
 | `src/tinyllm/quant.py` | INT8 weight-only quantization |
-| `src/tinyllm/hf_llama.py`, `safetensors_io.py` | Loads Llama-format checkpoints (TinyLlama) and exports to them |
-| `scripts/` | Data, tokenizer and benchmark scripts |
-| `tests/` | 297 tests: every optimized path is checked against the slow reference path |
-| `docs/` | Architecture, inference results, hardware, setup log; `docs/img/` holds the plots, drawn by `scripts/bench_all.py` |
+| `src/tinyllm/hf_llama.py`, `safetensors_io.py`, `logit_compare.py` | Loads Llama-format checkpoints (TinyLlama) and exports to them; compares logits with a reference model |
+| `src/tinyllm/server.py`, `obs.py` | OpenAI-compatible HTTP server (streaming, 429s past capacity, timeouts); JSON logs and Prometheus metrics |
+| `src/tinyllm/provenance.py`, `results.py`, `plots.py` | Records where each benchmark number came from (commit, versions, GPU clocks); renders the results tables and plots |
+| `scripts/` | Data, tokenizer, benchmark, load-test (`load_test.py`) and HF export (`export_hf.py`) scripts |
+| `tests/` | 301 tests: every optimized path is checked against the slow reference path |
+| `docs/` | Write-ups with the method and dated results of each step: [ARCHITECTURE](docs/ARCHITECTURE.md), [INFERENCE](docs/INFERENCE.md), [SERVING](docs/SERVING.md). Generated tables: [RESULTS](docs/RESULTS.md). Also [HARDWARE](docs/HARDWARE.md), [SETUP](docs/SETUP.md), [RESEARCH](docs/RESEARCH.md) (the attention ablation plan) and [PRIOR_ART](docs/PRIOR_ART.md) (related projects). `docs/img/` holds the plots, drawn by `scripts/bench_all.py` from the runs and `docs/data/` |
 
 ## Reproduce
 
@@ -136,6 +160,10 @@ uv run python scripts/bench_generate.py --model tinyllama --engine kv-graph
 uv run python scripts/bench_serving.py --model tinyllama
 uv run python scripts/bench_quant.py --model tinyllama
 
+# Serve TinyLlama over HTTP, then load-test it from a second terminal
+uv run python -m tinyllm.server --model tinyllama --cuda-graph
+uv run python scripts/load_test.py --rates 1,2,4 --power-mode performance
+
 # Every results table: rerun all benchmarks (~1.5–2 h), then render docs/RESULTS.md and the README tables
 uv run python scripts/bench_all.py --run --power-mode performance
 uv run python scripts/bench_all.py               # re-render from the saved JSON, no GPU
@@ -145,7 +173,6 @@ CI runs the CPU test suite on every push. GPU benchmark numbers come from the la
 
 ## Roadmap
 
-- Compare with vLLM and llama.cpp on the same GPU
 - Fused INT8 dequantize + matrix-vector kernel in Triton
 - CUDA graphs for the paged engine (the continuous engine has them)
 - Attention ablation (MHA vs GQA vs MLA vs a Gated DeltaNet hybrid) at a fixed compute budget ([docs/RESEARCH.md](docs/RESEARCH.md))

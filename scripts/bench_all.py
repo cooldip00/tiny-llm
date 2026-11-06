@@ -8,7 +8,8 @@
 Render: reads runs/bench/v1/ (--dir) and rewrites docs/RESULTS.md (generated in full) and the README's
 <!-- bench:NAME --> blocks (the rest of the README stays byte-identical). A missing result file is an
 error naming the --only command that makes it. It also draws the plots into docs/img/ (6.2, D-030;
-the training plot from docs/data/train_curve.json), byte-identical when the data hasn't changed.
+the training and load-test plots from docs/data/train_curve.json and load_sweep.json), byte-identical
+when the data hasn't changed.
 
 Run (--run, or --only NAME[,NAME]):
   - --run refuses a run directory that already holds results: one run = one session, never mixed.
@@ -143,7 +144,8 @@ def run(args, benches: list[R.Bench], run_dir: Path, rerun: bool) -> int:
 
 
 def render(run_dir: Path, results_md: Path, readme: Path, img_dir: Path = Path("docs/img"),
-           train_curve: Path = Path("docs/data/train_curve.json")) -> int:
+           train_curve: Path = Path("docs/data/train_curve.json"),
+           load_sweep: Path = Path("docs/data/load_sweep.json")) -> int:
     try:
         data = R.load_run(run_dir)
         page = R.render_results(data, run_dir.as_posix())
@@ -158,8 +160,9 @@ def render(run_dir: Path, results_md: Path, readme: Path, img_dir: Path = Path("
         print(f"{e}: run `uv sync` (matplotlib is in the dev group) to draw the plots")
         return 1
     curve = json.loads(train_curve.read_text()) if train_curve.exists() else None
+    load = json.loads(load_sweep.read_text()) if load_sweep.exists() else None
     try:
-        svgs = render_plots(data, curve)
+        svgs = render_plots(data, curve, load)
     except R.MissingResult as e:
         print(e)
         return 1
@@ -173,7 +176,8 @@ def render(run_dir: Path, results_md: Path, readme: Path, img_dir: Path = Path("
     for name in changed:
         (img_dir / name).write_text(svgs[name])
     print(f"plots in {img_dir}: {len(changed)} of {len(svgs)} changed"
-          + ("" if curve else f" ({train_curve} not found: no training plot; see scripts/extract_train_curve.py)"))
+          + ("" if curve else f" ({train_curve} not found: no training plot; see scripts/extract_train_curve.py)")
+          + ("" if load else f" ({load_sweep} not found: no load plot; see scripts/extract_load_sweep.py)"))
     for w in R.warnings(data):
         print("⚠", w)
     return 0

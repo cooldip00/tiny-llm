@@ -219,14 +219,72 @@ def serving(data: dict) -> Figure:
     return fig
 
 
+AQUA = "#1aa775"        # third engine; blue / orange / aqua checked for colour-vision deficiency on both themes
+LOAD_STYLE = {"Ours": (OURS, "o", 7), "vLLM": (HF, "s", 6.5), "llama.cpp": (AQUA, "D", 6)}
+
+
+def load_sweep(load: dict) -> Figure:
+    """docs/data/load_sweep.json (scripts/extract_load_sweep.py): the 4.8a equal-seat sweep, one row per rate."""
+    col = {c: i for i, c in enumerate(load["columns"])}
+    eng = {name: [[p[col[c]] for p in e["points"]] for c in ("rate_rps", "achieved_rps", "ttft_p95_s", "shed_rate")]
+           for name, e in load["engines"].items()}
+    top = max(r[-1] for r, *_ in eng.values())
+    fig = Figure(figsize=(7.6, 3.3))
+    left, right = fig.subplots(1, 2, gridspec_kw={"wspace": 0.7})
+    peak = max(max(a) for _, a, *_ in eng.values())
+    left.plot([0, peak * 1.12], [0, peak * 1.12], color=INK, linewidth=1.2, linestyle=(0, (4, 3)))
+    left.annotate("every request\nserved", (peak, peak), xytext=(-8, 0), textcoords="offset points", ha="right",
+                  va="center", fontsize=8.5)
+    slo = load["slo_ttft_p95_s"]
+    right.axhline(slo, color=INK, linewidth=1.2, linestyle=(0, (4, 3)))
+    right.annotate(f"SLO {n(slo)} s", (top, slo), xytext=(0, 3), textcoords="offset points", ha="right", va="bottom",
+                   fontsize=8.5)
+    for name, (rate, done, ttft, shed) in eng.items():
+        c, m, ms = LOAD_STYLE[name]
+        for ax, y in ((left, done), (right, ttft)):
+            ax.plot(rate, y, color=c, linewidth=2, marker=m, markersize=ms)
+        left.annotate(f"{name} {done[-1]:.1f}", (rate[-1], done[-1]), xytext=(7, 0), textcoords="offset points",
+                      va="center", fontsize=9, annotation_clip=False)
+        if shed[-1] > 0:        # the gap between our flat line and the diagonal is rejected, not queued
+            i = len(rate) - 2
+            left.annotate(f"{shed[i] * 100:.0f}–{shed[-1]:.0%} rejected\nwith a 429", (rate[-1], done[-1]), xytext=(0, 9),
+                          textcoords="offset points", ha="right", va="bottom", fontsize=8.5)
+        right.annotate(f"{name} {ttft[-1]:.0f} s" if ttft[-1] >= 10 else f"{name} {ttft[-1]:.1f} s",
+                       (rate[-1], ttft[-1]), xytext=(7, 0), textcoords="offset points", va="center", fontsize=9,
+                       annotation_clip=False)
+    for ax in (left, right):
+        ax.set_xlim(0, top * 1.04)
+        ax.xaxis.set_major_locator(FixedLocator([0, 4, 8, 12, 16]))
+        ax.grid(axis="y", **GRID)
+        ax.set_xlabel("offered requests / s")
+    left.set_ylim(0, peak * 1.12)
+    left.set_title("Completed requests / s", loc="left", fontsize=10, color=INK)
+    right.set_yscale("log")
+    right.yaxis.set_major_locator(FixedLocator([0.1, 1, 10, 100]))
+    right.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g} s"))
+    right.yaxis.set_minor_locator(NullLocator())
+    right.set_ylim(0.02, max(max(t) for _, _, t, _ in eng.values()) * 2)
+    right.set_title("Time to first token, p95 (log scale)", loc="left", fontsize=10, color=INK)
+    w = load["workload"]
+    _head(left, "TinyLlama 1.1B under load: 8 sequences per engine",
+          f"Poisson arrivals, {w['max_tokens']} new tokens per request, {w['duration']:.0f} s per rate. Past capacity "
+          "we reject the excess; vLLM and llama.cpp queue it.", lift=18)       # above the panel titles
+    commit = next(iter(load["engines"].values()))["commit"]
+    _foot(left, f"tiny-llm · docs/data/load_sweep.json ({load['source']}) · commit {commit} · "
+                "RTX 3070 Ti Laptop GPU, thermally throttled", below=40)
+    return fig
+
+
 DRAW = {"decode_b1.svg": decode_b1, "batch_scaling.svg": batch_scaling,
         "decode_profile.svg": decode_profile, "serving.svg": serving}
 
 
-def render_plots(data: dict, curve: dict | None) -> dict[str, str]:
-    """{file name: SVG text}; train_loss.svg only when the curve file exists."""
+def render_plots(data: dict, curve: dict | None, load: dict | None = None) -> dict[str, str]:
+    """{file name: SVG text}; train_loss.svg and load_sweep.svg only when their docs/data files exist."""
     with matplotlib.rc_context(RC):
         out = {name: _svg(draw(data)) for name, draw in DRAW.items()}
         if curve is not None:
             out["train_loss.svg"] = _svg(train_loss(curve))
+        if load is not None:
+            out["load_sweep.svg"] = _svg(load_sweep(load))
     return out

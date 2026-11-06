@@ -344,3 +344,7 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - Mermaid `xychart`: no log scale, no value labels, limited styling.
   - W&B screenshots: not reproducible from the repo, and they need the account.
   - Separate light and dark images in a `<picture>` element: two files per plot for no gain over a transparent SVG.
+- **Amendment (2026-11-06), the load-test plot:** a sixth plot, `load_sweep.svg`, in the README under "Results: vs vLLM and llama.cpp" (not in RESULTS.md, whose tables come from a different session). Two panels against offered request rate: completed requests / s with an "every request served" diagonal, and TTFT p95 on a log scale with the 1 s SLO line. Ours, vLLM and llama.cpp with 8 sequences each.
+  - Data: `docs/data/load_sweep.json` (2 KB), made by `scripts/extract_load_sweep.py` from the 4.8a `runs/bench/load/4.8a/*-sweep.json` (git-ignored): one summary row per rate, with each file's SHA-256 and commit. The engine labels replace the sweep's `model` field, which holds a local path.
+  - A third colour, aqua `#1aa775`, for the third engine; blue / orange / aqua passes the palette checks on white and `#0d1117`. Each engine also has its own marker and a label at the line end.
+  - Its alt text is written by hand in the README, outside the generated blocks: the data is a fixed past session, not `runs/bench/v1/`.
