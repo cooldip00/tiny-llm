@@ -20,7 +20,7 @@ from transformers import LlamaForCausalLM
 from tinyllm.generate import generate
 from tinyllm.hf_llama import TINYLLAMA, TINYLLAMA_REV, HFTokenizer, download, load_from_dir
 from tinyllm.logit_compare import first_divergence, hf_stepwise, logit_stats, ours_stepwise
-from tinyllm.provenance import Provenance
+from tinyllm.provenance import Provenance, claim_output
 
 CHAT = [
     "What is the capital of France? Answer in one sentence.",
@@ -45,7 +45,9 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--new-tokens", type=int, default=64)
     p.add_argument("--out", default="runs/bench/tinyllama_vs_hf.json")
+    p.add_argument("--overwrite", action="store_true", help="replace an existing --out (6.8)")
     args = p.parse_args()
+    out = claim_output(args.out, args.overwrite)
     N = args.new_tokens
     path = download()
     tok = HFTokenizer(path)
@@ -124,8 +126,6 @@ def main() -> None:
               f"HF bf16 vs fp32 {row['hf_bf16_vs_fp32']}  (lengths {row['len']})")
     print("\nours:", repr(tok.decode(greedy["ours_bf16"][0])))
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"model": TINYLLAMA, "revision": TINYLLAMA_REV, "new_tokens": N,
                                "stats": stats, "greedy_divergence": div, "provenance": prov.finish()}, indent=2))
     print(f"wrote {out}")

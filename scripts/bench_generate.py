@@ -25,6 +25,9 @@ Step 4.9d adds --model tinyllama (TinyLlama 1.1B, bf16 as published; output
 runs/bench/tinyllama/<engine>.json) and --engine hf (HF Transformers generate, the baseline,
 D-015). TinyLlama prompts are the same validation text, re-tokenized with its own tokenizer.
 Every row also reports the bandwidth ceiling B * 423 GB/s / stored weight bytes and the % of it.
+
+Step 6.8: a sweep other than the default batch sizes / prompt lengths gets its own default name
+(e.g. kv-graph_b32.json), and an existing output is refused unless --overwrite.
 """
 
 import argparse
@@ -42,7 +45,7 @@ from tinyllm.data import DATA_DIR, TOKEN_DTYPE, load_tokens
 from tinyllm.generate import generate, sample
 from tinyllm.kv_cache import KVCache
 from tinyllm.model import RotaryEmbedding, Transformer
-from tinyllm.provenance import Provenance
+from tinyllm.provenance import Provenance, claim_output
 from tinyllm.train import load_checkpoint
 
 BANDWIDTH = 423e9           # bytes/s, Phase 0.5 measurement (docs/HARDWARE.md)
@@ -311,11 +314,24 @@ def bench(model, engine, batch, prompt_len, new_tokens, warmup, repeats, device)
     }
 
 
+DEFAULT_PROMPT_LENS = "32,128,512"
+
+
+def default_out(engine: str, dtype: str, tiny: bool, batch_sizes: str, prompt_lens: str,
+                default_batches: str) -> str:
+    """runs/bench[/tinyllama]/<engine>[_bf16][_b<sizes>][_p<lens>].json: a partial rerun never takes the grid's name."""
+    tag = "".join(f"_{k}{v.replace(',', '-')}" for k, v, d in
+                  (("b", batch_sizes, default_batches), ("p", prompt_lens, DEFAULT_PROMPT_LENS)) if v != d)
+    if tiny:
+        return f"runs/bench/tinyllama/{engine}{tag}.json"
+    return f"runs/bench/{engine}{'_bf16' if dtype == 'bf16' else ''}{tag}.json"
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", default="checkpoints/main/best.pt")
     p.add_argument("--model", default=None, help="'tinyllama' instead of --ckpt (4.9d)")
-    p.add_argument("--prompt-lens", default="32,128,512")
+    p.add_argument("--prompt-lens", default=DEFAULT_PROMPT_LENS)
     p.add_argument("--batch-sizes", default=None,
                    help="default 1,8,32 (naive on TinyLlama: 1; a full forward per token at 1.1B)")
     p.add_argument("--new-tokens", type=int, default=256)
@@ -325,7 +341,9 @@ def main() -> None:
     p.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32",
                    help="weight storage; both run under bf16 autocast. bf16 is D-023's inference layout")
     p.add_argument("--out", default=None,
-                   help="default: runs/bench/<engine>[_bf16].json, runs/bench/tinyllama/<engine>.json")
+                   help="default: runs/bench/<engine>[_bf16][_b..][_p..].json, "
+                        "runs/bench/tinyllama/<engine>[_b..][_p..].json (_b/_p only for a non-default sweep)")
+    p.add_argument("--overwrite", action="store_true", help="replace an existing --out")
     args = p.parse_args()
     tiny = args.model == "tinyllama"
     if args.model not in (None, "tinyllama"):
@@ -334,9 +352,11 @@ def main() -> None:
         p.error("--engine hf needs --model tinyllama")
     if tiny:
         args.dtype = "bf16"   # as published; the fp32 copy (4.4 GB) is not an inference layout (D-023)
-    args.batch_sizes = args.batch_sizes or ("1" if tiny and args.engine == "naive" else "1,8,32")
-    args.out = args.out or (f"runs/bench/tinyllama/{args.engine}.json" if tiny else
-                            f"runs/bench/{args.engine}{'_bf16' if args.dtype == 'bf16' else ''}.json")
+    default_batches = "1" if tiny and args.engine == "naive" else "1,8,32"
+    args.batch_sizes = args.batch_sizes or default_batches
+    args.out = args.out or default_out(args.engine, args.dtype, tiny, args.batch_sizes, args.prompt_lens,
+                                       default_batches)
+    out = claim_output(args.out, args.overwrite)
     device = "cuda"
 
     model = use_model("tinyllama" if tiny else args.ckpt, device, args.dtype)
@@ -389,7 +409,8 @@ def main() -> None:
 
     rows = []
     prov = Provenance(weights=f"{args.dtype} + bf16 autocast", script="bench_generate",
-                      engine=args.engine, model="tinyllama" if tiny else args.ckpt).start()
+                      engine=args.engine, model="tinyllama" if tiny else args.ckpt,
+                      warmup=args.warmup, repeats=args.repeats).start()
     for b in map(int, args.batch_sizes.split(",")):
         for plen in map(int, args.prompt_lens.split(",")):
             r = bench(model, args.engine, b, plen, args.new_tokens, args.warmup, args.repeats, device)
@@ -403,8 +424,6 @@ def main() -> None:
                   f"peak {r['peak_vram_mib']:6.0f} MiB"
                   + (" | window slides" if r["window_slides"] else ""), flush=True)
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"engine": args.engine, "dtype": args.dtype,
                                "model": "tinyllama" if tiny else args.ckpt, "bandwidth_bytes_s": BANDWIDTH,
                                "weight_bytes": stored_weight_bytes(model), "gpu": torch.cuda.get_device_name(),

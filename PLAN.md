@@ -169,6 +169,46 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 
 - [x] 6.7 CI (D-025): GitHub Actions runs the CPU test suite on every push, with a status badge in the README. **Before 6.5a (v1-preview).** _Done 2026-11-05: workflow green; the badge is in the first README._
 - [ ] 6.8 One command regenerates every results table (D-025): `scripts/bench_all.py` runs each benchmark script and writes the INFERENCE.md tables from `runs/bench/*.json`, so the README numbers can be reproduced from the repo. Part of 6.1, v1.
+  - _Plan agreed 2026-11-06, not started. Build ~3–4 h, then one ~1.5–2 h unattended GPU run._
+  - **Why the plan changed:** INFERENCE.md is a dated history. Each table is a snapshot from its step, and the prose quotes those numbers. Regenerating it in place would rewrite history. Some snapshots also have no JSON.
+  - **Steps:**
+    1. **Fix output-name collisions first.**
+       - `bench_serving.py --paged` / `--cuda-graph` share one default filename, and so do `bench_generate.py` reruns at other batch sizes. That is how the 11-04 TinyLlama serving JSON was lost.
+       - Default names will include the mode, e.g. `serving_paged`, `serving_graph`, and a `_b…`/`_p…` tag for a non-default batch or prompt sweep. `bench_all.py` passes explicit `--out` paths under `runs/bench/v1/{30m,tinyllama}/`.
+       - Bench scripts will refuse to overwrite an existing result unless given `--overwrite`.
+    2. **`scripts/bench_all.py`**
+       - `--run --power-mode X`: runs every benchmark into a fresh `runs/bench/v1/`, so all numbers come from one commit and one session.
+         - 30M model: generate (naive, kv, kv-graph), serving, paged, INT8.
+         - TinyLlama: hf, naive, kv, kv-graph (B up to 32), serving (with graphs), INT8.
+         - The 4.9c logits check.
+         - Not vLLM / llama.cpp: they need `~/spike`, and the 4.8a JSON from 2026-11-06 is reused.
+       - Default (no `--run`): rebuilds the tables from the JSON in seconds, with no GPU. `--only <bench>` reruns one benchmark.
+       - **Cool-down gate:** before each benchmark, wait until the GPU is below ~60 °C (adds ~10–15 min in total).
+       - **Throttle warning:** flags a benchmark whose provenance shows a hardware slowdown (`hw_slowdown`, `hw_thermal_slowdown`, `hw_power_brake_slowdown`) or a busy SM clock *median* below 1,400 MHz, and suggests `--only`. The median, not the minimum: single busy samples dip to ~345 MHz even in good runs.
+       - Copies all console output to `runs/bench/v1/run.log`. The 11-04 numbers survived only because `sweep.log` existed.
+    3. **Where the output goes**
+       - New `docs/RESULTS.md`: fully generated, and its header says so. One heat line per table: SM clock median / minimum, peak temperature, throttle reasons.
+       - README results tables sit between `<!-- bench:NAME -->` markers and are filled from the same run.
+       - INFERENCE.md keeps its tables. It gets two added lines: one pointing to RESULTS.md, and one pointing the 4.9d continuous-batching table at `sweep.log`.
+    4. **CPU tests (they run in CI):**
+       - rendering from small made-up JSON files
+       - marker replacement leaves the rest of the file byte-identical
+       - a missing JSON gives a clear message, not an empty table
+       - default output names differ per mode
+    5. **Docs:** D-029, because the tables go to RESULTS.md rather than INFERENCE.md. Then tick this step and add a PROGRESS entry with the run's numbers and conditions.
+  - **Before the GPU run:** laptop plugged in, NitroSense in Performance mode, laptop raised or on a cooling pad, nothing else on the GPU, no vLLM / llama.cpp running.
+  - **Expect:**
+    - README numbers will shift (sessions differ by 10–20%), and the 11-04 figure of 1.37× gets replaced.
+    - Correctness checks and ratios within one run are the reliable results. Absolute tok/s is labelled with that session's conditions.
+  - **Recovered history** (printed text only, no JSON or provenance):
+    - The 11-04 TinyLlama serving rows are in `runs/bench/tinyllama/sweep.log`: 198 / 272, 360 / 475, 669 / 738 tok/s (static / continuous at 8 / 16 / 32 slots).
+    - The eager B=32 P=128 runs gave 1,586, 1,411, 1,298, 1,130 and 1,089 tok/s, as printed in the 11-04 session.
+    - To do: back up `sweep.log` outside the repo.
+  - **Lessons for every future benchmark:**
+    - each mode gets its own output path
+    - never overwrite raw results
+    - copy console output to a log
+    - compare absolute numbers only within one session
 - [ ] 6.9 Release strategies (D-028, **v1.1**, after v1: ~11-19 → 11-21, ~9–10 h; design in [docs/SERVING.md](docs/SERVING.md)), built on 4.13's `Router`:
   - blue-green: two engines loaded, an admin switch, drain, instant rollback (~2 h)
   - shadow: mirror 10–20% of traffic when the live queue is idle; a report on token agreement, the latency difference and the impact on live latency (~2–3 h)

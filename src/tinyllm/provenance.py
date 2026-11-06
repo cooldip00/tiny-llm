@@ -63,6 +63,19 @@ def git_info() -> dict:
     return {"commit": commit, "dirty": None if status is None else bool(status)}
 
 
+def claim_output(path: str | Path, overwrite: bool = False) -> Path:
+    """Call before a benchmark starts: refuse an existing result file unless overwrite (6.8).
+
+    The 11-04 TinyLlama serving JSON was lost because a later run with other flags wrote the same
+    default name. Checking at startup costs nothing; finding out after an hour's run costs the hour.
+    """
+    path = Path(path)
+    if path.exists() and not overwrite:
+        raise SystemExit(f"{path} already exists: pass a new --out, or --overwrite to replace it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def decode_throttle(mask: int | None) -> list[str]:
     if mask is None:
         return []

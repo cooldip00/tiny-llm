@@ -5,15 +5,18 @@
 A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 GB), and an inference engine for it, benchmarked against the GPU's memory-bandwidth ceiling. Plain PyTorch, no inference libraries; Hugging Face Transformers appears only as a test reference and baseline.
 
 **Highlights**
+<!-- bench:highlights -->
 - **TinyLlama 1.1B decodes at 128 tok/s at batch 1: 67% of the bandwidth ceiling, 2.8× HF `generate`** (KV cache + CUDA graphs).
 - **Our engine's logits are bit-identical to HF Transformers** in bf16 on TinyLlama, prefill and cached decode.
 - **Serving:** continuous batching gives 1.37× static batching. A paged KV cache fits 25 sequences where contiguous slots fit 8, for 1.46× the throughput in the same memory.
+<!-- /bench:highlights -->
 - **Training:** a 30M-parameter model on ~1B TinyStories tokens in 2 h 27 min at **56% MFU**.
 
 > Status: **v1-preview**. Still to come: comparisons with vLLM and llama.cpp, a fused INT8 kernel, and an attention ablation (see [Roadmap](#roadmap)).
 
 ## Results: TinyLlama 1.1B inference
 
+<!-- bench:tinyllama -->
 Decode speed at batch 1 with a 128-token prompt, 256 new tokens, median of 5 runs. The ceiling is the measured bandwidth divided by the weight size: 423 GB/s ÷ 2,098 MiB = **192 tok/s per sequence**, because each decoded token has to read every weight once.
 
 | Engine | tok/s | % of ceiling | ms / step |
@@ -27,11 +30,13 @@ Decode speed at batch 1 with a 128-token prompt, 256 new tokens, median of 5 run
 - **Batching:** with graphs, 851 tok/s at batch 8 and 2,083 tok/s at batch 32 (HF: 358 and 1,445).
 - **INT8 weights:** quality is unchanged (val loss +0.0010, 98.5% argmax agreement with bf16), but decode is **slower**: 0.80× bf16 at batch 1, 0.54× at batch 32. The weight is cast back to bf16 on every call, so each step moves more bytes, not fewer. A fused dequantize-and-multiply kernel fixes this; it's on the roadmap.
 - **Correctness:** bf16 logits equal HF's bf16 logits exactly (`torch.equal`) at all 415 test positions. Every top-1 disagreement with fp32 is a near-tie (margin < 0.02 logits).
+<!-- /bench:tinyllama -->
 
-Full tables, by batch size and prompt length, with the method and caveats: [docs/INFERENCE.md](docs/INFERENCE.md).
+Full tables from the same run, with GPU clocks and temperatures: [docs/RESULTS.md](docs/RESULTS.md). The method, caveats and the dated results of each step: [docs/INFERENCE.md](docs/INFERENCE.md).
 
 ## Results: serving
 
+<!-- bench:serving -->
 64 requests of mixed lengths (9,004 tokens to generate), median of 3–5 runs.
 
 | Scheduler / cache | Setting | tok/s | vs baseline |
@@ -43,6 +48,7 @@ Full tables, by batch size and prompt length, with the method and caveats: [docs
 | Paged KV cache (30M model) | same 64 MiB, 25 sequences | 924 | 1.46× |
 
 The paged cache stores KV in fixed-size blocks through a per-sequence block table, as in vLLM, so a sequence holds only the blocks it has filled. The share of reserved KV holding real tokens goes from 52% to 97%.
+<!-- /bench:serving -->
 
 ## Results: training
 

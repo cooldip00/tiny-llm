@@ -20,6 +20,10 @@ cut from the validation text re-tokenized by its tokenizer (bench_generate.tinyl
 Step 4.11b: --cuda-graph adds "cont+graph" rows: continuous batching with the decode step
 replayed as CUDA graphs. One decoder per slot count, every bucket captured before the timed
 runs (capture_s is reported apart, not in wall time) and freed after its row.
+
+Step 6.8: the default output name carries the row-adding flags (serving[_graph][_paged].json),
+and an existing output is refused unless --overwrite. Before, --paged / --cuda-graph runs all
+wrote serving.json, and that is how the 11-04 TinyLlama serving JSON was lost.
 """
 
 import argparse
@@ -37,7 +41,7 @@ from tinyllm.cuda_graph import SlotGraphDecoder
 from tinyllm.engine import Request, run_continuous, run_static
 from tinyllm.generate import generate
 from tinyllm.kv_cache import SlotKVCache
-from tinyllm.provenance import GpuMonitor, Provenance
+from tinyllm.provenance import GpuMonitor, Provenance, claim_output
 
 
 def make_workload(n: int, seed: int) -> list[Request]:
@@ -68,6 +72,11 @@ def agreement(got: list[list[int]], ref: list[list[int]]) -> dict:
     return {"identical": len(got) - len(first_div), "of": len(got), "first_divergence": sorted(first_div)}
 
 
+def default_out(tiny: bool, cuda_graph: bool, paged: bool) -> Path:
+    name = "serving" + ("_graph" if cuda_graph else "") + ("_paged" if paged else "")
+    return Path(f"runs/bench/{'tinyllama/' if tiny else ''}{name}.json")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=Path, default=Path("checkpoints/main/best.pt"))
@@ -81,12 +90,13 @@ def main() -> None:
                     help="4.11b: add continuous rows with the decode step as CUDA graphs")
     ap.add_argument("--model", default=None, help="'tinyllama' instead of --ckpt (4.9d)")
     ap.add_argument("--out", type=Path, default=None,
-                    help="default: runs/bench/serving.json, runs/bench/tinyllama/serving.json")
+                    help="default: runs/bench[/tinyllama]/serving[_graph][_paged].json")
+    ap.add_argument("--overwrite", action="store_true", help="replace an existing --out")
     args = ap.parse_args()
     tiny = args.model == "tinyllama"
     if args.model not in (None, "tinyllama"):
         ap.error("--model takes 'tinyllama'; use --ckpt for a checkpoint")
-    args.out = args.out or Path("runs/bench/tinyllama/serving.json" if tiny else "runs/bench/serving.json")
+    args.out = claim_output(args.out or default_out(tiny, args.cuda_graph, args.paged), args.overwrite)
     device = "cuda"
     model = use_model("tinyllama" if tiny else str(args.ckpt), device)
     reqs = make_workload(args.requests, args.seed)
@@ -151,7 +161,6 @@ def main() -> None:
               f"active {stats['peak_active']} | preempt {stats['preemptions']} | "
               f"VRAM {stats['peak_vram_mib']:.0f} MiB | "
               f"same as solo {c['identical']}/{c['of']}", flush=True)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"workload": {"requests": len(reqs), "seed": args.seed},
                                     "provenance": prov.finish(), "rows": rows}, indent=2))
     print(f"wrote {args.out}")

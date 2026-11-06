@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from bench_generate import bench, kv_greedy, make_prompts, use_model, val_tokens  # noqa: E402
 
 from tinyllm.generate import generate
-from tinyllm.provenance import Provenance
+from tinyllm.provenance import Provenance, claim_output
 from tinyllm.quant import quantize_model, weight_bytes
 from tinyllm.train import TrainConfig, evaluate
 
@@ -72,11 +72,13 @@ def main() -> None:
     p.add_argument("--eval-batches", type=int, default=20)
     p.add_argument("--model", default=None, help="'tinyllama' instead of --ckpt (4.9d)")
     p.add_argument("--out", default=None, help="default: runs/bench/int8.json, runs/bench/tinyllama/int8.json")
+    p.add_argument("--overwrite", action="store_true", help="replace an existing --out (6.8)")
     args = p.parse_args()
     tiny = args.model == "tinyllama"
     if args.model not in (None, "tinyllama"):
         p.error("--model takes 'tinyllama'; use --ckpt for a checkpoint")
-    args.out = args.out or ("runs/bench/tinyllama/int8.json" if tiny else "runs/bench/int8.json")
+    out = claim_output(args.out or ("runs/bench/tinyllama/int8.json" if tiny else "runs/bench/int8.json"),
+                       args.overwrite)
     dev = "cuda"
 
     if tiny:
@@ -149,8 +151,6 @@ def main() -> None:
                   f"{med['pct_of_ceiling']:.1f}% of its ceiling) | TTFT {med['ttft_ms']:.2f} ms | "
                   f"rounds {[round(x) for x in rows[-1]['decode_tok_s_rounds']]}")
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"model": "tinyllama" if tiny else args.ckpt, "baseline": base, "gpu": torch.cuda.get_device_name(), "torch": torch.__version__,
                                "provenance": provenance, "weights_mib": sizes, "val_loss": losses, "eval_batches": args.eval_batches,
                                "teacher_forced": tf, "greedy_rows_identical": same, "rows": rows}, indent=2))

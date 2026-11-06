@@ -309,3 +309,18 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - serving architecture diagram → 6.1
   - offline eval gate as code → 6.9
   - About +2.5–3 h before v1 (+1 h in v1.1). v1 still ~11-18.
+
+### D-029 — Results tables: generated RESULTS.md + README blocks from one run; INFERENCE.md stays a history · ACCEPTED (2026-11-06). Refines how 6.8 (D-025) is done
+- **Context:** 6.8 planned to rewrite the INFERENCE.md tables from `runs/bench/*.json`. But INFERENCE.md is a dated history: each table is a snapshot from its step, and its prose quotes those numbers. Some snapshots have no JSON: the 11-04 TinyLlama serving JSON was overwritten by a rerun in another mode, and survives only as printed text in `sweep.log`. The README mixes numbers from different sessions, which differ by 10–20%.
+- **Choice:**
+  - `scripts/bench_all.py --run --power-mode X` runs every benchmark (30M and TinyLlama: generate, serving, INT8, profile; the TinyLlama logits check) into one fresh directory, `runs/bench/v1/`, from one clean commit in one session. vLLM / llama.cpp are not rerun (4.8a JSON reused).
+  - Before each benchmark it waits until the GPU is ≤ 60 °C. Console output is copied to `run.log`; `manifest.json` records status, duration, cool-down, start temperature, power mode and commit per benchmark.
+  - Generated outputs: `docs/RESULTS.md` (fully generated, one heat line per table: busy SM clock median / min, peak temperature, throttle reasons) and three README blocks between `<!-- bench:NAME -->` markers. Text outside the markers is never touched. Old README values stay in git history.
+  - INFERENCE.md keeps its tables and gets pointer lines only.
+  - Bench scripts refuse to overwrite an existing result without `--overwrite`, and default output names include the mode.
+  - A benchmark is flagged if its provenance shows a hardware slowdown or a busy SM clock median below 1,400 MHz.
+- **Why:** a dated history must not be rewritten, and headline numbers should come from one session with stated conditions, so ratios are like-for-like and every number has a JSON behind it.
+- **Rejected:**
+  - Regenerating INFERENCE.md in place: rewrites history, and some tables have no JSON.
+  - Rendering from the existing scattered JSONs: mixed sessions and commits, some files with no provenance.
+  - Flagging on the clock minimum: single busy samples dip far below 1,400 MHz in good runs.

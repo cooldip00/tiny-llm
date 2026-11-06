@@ -29,7 +29,7 @@ from tinyllm.config import ModelConfig
 from tinyllm.cuda_graph import GraphDecoder
 from tinyllm.kv_cache import KVCache
 from tinyllm.model import RotaryEmbedding, Transformer
-from tinyllm.provenance import GpuMonitor, Provenance
+from tinyllm.provenance import GpuMonitor, Provenance, claim_output
 from tinyllm.train import load_checkpoint
 
 BANDWIDTH = 423e9           # bytes/s, Phase 0.5 measurement (docs/HARDWARE.md)
@@ -127,10 +127,12 @@ def main() -> None:
     p.add_argument("--ctx", type=int, default=128, help="prompt length before the profiled steps")
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--out-dir", default="runs/profile")
+    p.add_argument("--overwrite", action="store_true", help="replace an existing summary (6.8)")
     args = p.parse_args()
+    name = "tinyllama" if args.model == "tinyllama" else Path(args.model).parent.name
+    out = claim_output(Path(args.out_dir) / f"decode_{name}_B{args.batch}.json", args.overwrite)
 
     model = load(args.model)
-    name = "tinyllama" if args.model == "tinyllama" else Path(args.model).parent.name
     weight_bytes = sum(t.numel() * t.element_size() for t in model.parameters())
     ceiling = BANDWIDTH / weight_bytes                            # tok/s per row
     assert args.ctx + 10 + 20 + args.steps + 20 <= model.cfg.max_seq_len, "ctx + steps exceed max_seq_len"
@@ -153,7 +155,6 @@ def main() -> None:
               f"({r['pct_of_ceiling']:.1f}% of ceiling at this B)", flush=True)
     speedup = rows["eager"]["ms_per_step"] / rows["graph"]["ms_per_step"]
     print(f"graph speedup: {speedup:.2f}x")
-    out = Path(args.out_dir) / f"decode_{name}_B{args.batch}.json"
     out.write_text(json.dumps({"model": name, "batch": args.batch, "ctx": args.ctx,
                                "weight_bytes": weight_bytes, "ceiling_tok_s_per_row": ceiling,
                                "speedup": speedup, "modes": rows, "provenance": prov.finish()}, indent=2))
