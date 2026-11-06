@@ -47,10 +47,22 @@ Newest first. One entry per work block: what was done, numbers, next.
 
   - **Rated load 4 req/s** (~506 tok/s). Saturation ~5.4 req/s, ~690 tok/s. That's above the 4.11b offline 581 tok/s at 8 slots, because here every request is the same length, so there's no long-tail drain.
   - Past capacity the server behaves as designed: the queue fills, the rest get 429, **0 failures**, and TTFT is capped at ~5.9 s = 32 queued ÷ 5.4 req/s. The server's `/stats` agrees (1,458 requests, error rate 0, 429 rate 8.6%, queue wait p95 5.7 s).
-  - ITL p50 stays at 9–10 ms (~105 tok/s per stream) at every load. ITL p99 of 30–45 ms comes from prefills of newly admitted requests stalling the decode step (chunked prefill would fix it; already in PARKING_LOT, 2026-11-04, with this evidence added).
+  - ITL p50 stays at 9–10 ms (~105 tok/s per stream) at every load. ITL p99 of 30–45 ms comes from prefills of newly admitted requests stalling the decode step. The prompts are ~15 tokens, so the stall is one eager prefill forward, not prompt length: capturing the prefill as a CUDA graph would fix it, chunked prefill would not (PARKING_LOT 2026-11-06).
   - At 0.5 req/s TTFT p50 is *higher* (83 vs 48 ms). Likely the GPU dropping clocks between sparse requests; provenance has the clock samples.
   - Server: 1,554 JSON log lines (1,458 request lines, no text); VRAM 2.5 GB, RSS 1.5 GB; clean drain on SIGTERM.
 - Observation for later: a 32-place queue lets admitted requests wait ~6 s, far past the 1 s TTFT SLO. A queue sized from the SLO (≈ TTFT target × throughput ≈ 5) would shed more but keep admitted requests within the SLO. Parked (PARKING_LOT 2026-11-06).
+- Measured the same day with `--max-queue 5` (same setup, Performance mode; `runs/bench/load/tinyllama-8slots-graph-q5.json`):
+
+  | Rate (req/s) | Queue | OK | 429 | TTFT p95 | Latency p99 | tok/s |
+  |---|---|---|---|---|---|---|
+  | 6 | 32 | 348 | 33 | 5.81 s | 7.31 s | 689 |
+  | 6 | 5 | 323 | 37 | **0.92 s** | **2.52 s** | 670 |
+  | 8 | 32 | 362 | 92 | 5.83 s | 7.33 s | 693 |
+  | 8 | 5 | 334 | 156 | **1.13 s** | **2.69 s** | 693 |
+
+  - Throughput is unchanged (saturation ~5.4 req/s); the short queue only moves waiting time out of TTFT and into 429s, which a client can retry. Past capacity, TTFT p95 drops 5–6× and latency p99 ~2.8×.
+  - At 4 req/s neither queue sheds and both meet the SLOs (rated load 4 req/s either way). The TTFT p95 there (0.45 vs 0.80 s) differs with the arrival sample, so it isn't a fair comparison.
+  - At 8 req/s TTFT p95 is still 1.13 s: about 5 / 5.4 ≈ 0.93 s of queue wait plus prefill and step jitter. A queue of 4 would fit the 1 s target. The server default stays 32 for now. The Space default (6.5b) should come from this rule: queue ≈ TTFT target × saturation rate, minus some headroom.
 - Next: 4.8a, the same `load_test.py` against vLLM (and llama.cpp) on TinyLlama.
 
 ### 2026-11-06 — 4.13 step 2, parts 3 + 4: the HTTP server and failure injection
