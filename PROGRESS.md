@@ -32,7 +32,13 @@ Newest first. One entry per work block: what was done, numbers, next.
   - explicit settings equal to the engine's sample exactly as without them
   - bad settings are rejected
 - Full suite **247 passed**.
-- Next: part 2, `obs.py`.
+- Part 2, `obs.py` (stdlib only):
+  - `RequestRecord`: one JSON log line per request, never text; the client is a salted hash
+  - `EngineSnapshot`
+  - `Metrics`, thread-safe: rolling 5 min / 1 h windows for `/stats`; counters and TTFT / latency histograms by variant for `/metrics` (Prometheus text format)
+  - `JsonFormatter` and `setup_logging`
+  - 7 tests, all passing.
+- Next: part 3, `server.py`.
 
 ### 2026-11-06 — Serving design: production layer, observability, release strategies (D-028)
 - Design discussion before 4.13 step 2. Recorded in **D-028**, **[docs/SERVING.md](docs/SERVING.md)**, PLAN 4.13 / 6.5b / 6.9 and PARKING_LOT.
