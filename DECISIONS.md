@@ -302,3 +302,10 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - Greedy-only server: a public demo needs temperature / top-p, and per-request settings are cheap once rows are grouped.
   - Logging prompt text for debugging: a privacy risk for little gain. Timings and token counts explain performance problems.
   - Exposing the laptop server publicly (tunnel): a security risk, and the Space already is the public endpoint.
+- **Amendment (2026-11-06):** five PARKING_LOT suggestions promoted, each into the step that builds what it checks:
+  - failure-injection tests → 4.13 step 2
+  - written SLOs with error budgets → defined in 4.13 step 3, shown in 6.5b
+  - Docker Space + CI image check → 6.5b
+  - serving architecture diagram → 6.1
+  - offline eval gate as code → 6.9
+  - About +2.5–3 h before v1 (+1 h in v1.1). v1 still ~11-18.

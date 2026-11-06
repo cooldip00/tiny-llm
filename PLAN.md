@@ -102,8 +102,10 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
     - observability core: a JSON request log line (queue wait, TTFT, inter-token p50 / p95, tokens, finish reason, load at arrival), `X-Request-ID`, engine snapshots every ~5 s, `/stats` (5 min / 1 h windows), `/metrics` (Prometheus text format), `--log-level debug` with per-step timings and slow-request timelines, `/debug/state` (localhost only)
     - a `Router` with one variant; `X-Model-Version` (checkpoint hash + git commit) on every response and in every log line
     - CLI: `python -m tinyllm.server --model tinyllama | --ckpt PATH --slots 8 --cuda-graph`
-    - Done when: greedy served outputs equal `generate()`, streamed tokens equal the non-streamed ones, and tests cover 429 on a full queue, the rate limit, timeout, disconnect → slot freed, shutdown mid-request, and the metrics / log fields.
+    - failure injection (D-028 amendment, +30–45 min): a test-only fault hook in the engine thread (slow step, exception at step N, simulated OOM), so the timeout, 500, not-ready and drain paths are tested by forcing the fault
+    - Done when: greedy served outputs equal `generate()`, streamed tokens equal the non-streamed ones, and tests cover 429 on a full queue, the rate limit, timeout, disconnect → slot freed, shutdown mid-request, each injected fault, and the metrics / log fields.
   - [ ] Step 3: the load generator (`scripts/load_test.py`): Poisson arrivals over a range of rates. Reports TTFT and inter-token p50 / p99, throughput vs rate, goodput at a latency SLO, and 429s / queue wait past capacity. The same client is used against vLLM in 4.8a.
+    - SLOs written first (D-028 amendment, ~15 min): 2–3 targets in docs/SERVING.md (e.g. TTFT p95, availability, 429 rate), each with its error budget. Goodput is measured against the TTFT target.
 
 ### Track B — Real-scale inference (D-015, D-016)
 - [ ] 4.9 TinyLlama 1.1B in our engine
@@ -138,6 +140,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 
 ## Phase 6 — Writeup
 - [ ] 6.1 README: what, why, results, how to reproduce
+  - a serving architecture diagram (D-028 amendment, ~20 min, after 4.13): client → router → engine thread → slots / KV, and where each metric is measured; also in docs/SERVING.md
 - [ ] 6.2 Plots: loss curves, inference speedups, ablation trade-offs
 - [ ] 6.3 3–4 resume bullets with real numbers
 - [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
@@ -153,6 +156,10 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
       - A privacy notice: metadata only, salted IP hashes.
       - A written scaling design: replicas, routing, autoscaling on queue depth.
       - If late, cut first the status-page charts, then the usage report.
+    - _D-028 amendment (2026-11-06), about +1.5–2 h:_
+      - A Docker Space, built from the same image as the local server; a one-line `docker run` in the README.
+      - A CI job that builds the image, starts it on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion.
+      - The status page shows the error budget left for each SLO from 4.13 step 3.
   - [ ] 6.5c W&B project set to public; link the training curves from the README
   - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume
   - [ ] 6.5e LinkedIn: three posts, one per milestone (training done → KV cache + paged KV → TinyLlama results)
@@ -169,6 +176,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
   - A/B: sticky assignment by hashed client id, thumbs up / down, a significance test and CIs, validated with simulated users, plus the sample size a real verdict needs (~3 h)
   - variant id = checkpoint hash + git commit
   - a written promotion pipeline: offline gate → shadow → canary → live
+  - the offline gate as code (D-028 amendment, ~1 h): a variant must pass val loss (or perplexity) within a threshold, greedy agreement with the current model on a fixed prompt set, and the benchmark, before shadow or canary
 
 **Done when (6.5–6.6):** the repo is public with results, at least one post is live, and every resume bullet is backed by a number in PROGRESS.md.
 

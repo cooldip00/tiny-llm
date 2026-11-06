@@ -66,8 +66,14 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
   6. A "What I learned / design decisions" section linking the key D-xxx entries.
   7. Plain-language explainers for non-specialists: what a KV cache is and why decode is memory-bound.
 - [2026-11-06] **Docker Space** — run the HF Space as a Docker Space with the same image as the local server, so "it works on my machine" and "it works on the Space" are one claim. Also gives a one-line `docker run` in the README — 6.5b.
+  - _Promoted to PLAN 6.5b (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **CI smoke deploy** — a CI job that builds the image, starts the server on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion. It catches packaging breaks before the Space does — 6.5b / 6.7.
+  - _Promoted to PLAN 6.5b (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **Failure-injection tests** — a fault-injection hook in the engine thread (slow step, exception at step N, OOM), to test that timeouts, 500s, readiness and draining behave as designed. This is a common interview question ("what happens when...") — 4.13 step 2 if cheap, else v1.1.
+  - _Promoted to PLAN 4.13 step 2 (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **Serving architecture diagram** — one diagram in the README and SERVING.md: client → router → engine thread → slots / KV, plus where each metric is measured. Useful to point at in interviews — 6.1.
+  - _Promoted to PLAN 6.1 (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **Offline eval gate per variant** — before any shadow / canary, a variant must pass a fixed eval: val loss (or perplexity) within a threshold, greedy agreement vs the current model on a fixed prompt set, and the benchmark. Gives 6.9's promotion pipeline its first stage as code, not prose — 6.9.
+  - _Promoted to PLAN 6.9 (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **Written SLOs + error budget** — define 2–3 SLOs (TTFT p95, availability, 429 rate) in SERVING.md with their error budgets, and have the status page show the budget left — 6.5b.
+  - _Promoted: defined in PLAN 4.13 step 3, shown in 6.5b (D-028 amendment, 2026-11-06)._
