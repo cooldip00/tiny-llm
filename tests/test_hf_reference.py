@@ -168,3 +168,50 @@ def test_tinyllama_bf16_logits_as_close_to_fp32_as_hf_bf16(tinyllama_dir):
         top2 = ref.topk(2, -1).values
         flips = (top2[:, 0] - top2[:, 1])[o_l.argmax(-1) != ref.argmax(-1)]
         assert (flips < 0.1).all(), (name, flips)
+
+
+# --- 4.8b: the export's tokenizer and token ids (CPU) ---------------------------------------------
+
+TEXTS = ["Once upon a time, there was a little girl named Lily.", " leading space", "  two  spaces\n\nnew lines\t tab",
+         "naïve café, 東京 🙂", "The end.<|endoftext|>Once upon", "", "1234567890 + 0.5 = x", "Hi !  ."]
+
+
+def test_exported_tokenizer_matches_ours(tmp_path):
+    """AutoTokenizer on the exported folder gives our ids and our text back, byte for byte."""
+    from transformers import AutoTokenizer
+
+    from tinyllm.tokenizer import EOS, load_tokenizer
+    hl.save_tokenizer_as_hf(tmp_path, model_max_length=512)
+    ref, tok = AutoTokenizer.from_pretrained(tmp_path), load_tokenizer()
+    assert ref.eos_token_id == tok.token_to_id(EOS) == 0 and ref.bos_token_id is None
+    assert ref.pad_token_id == 0 and ref.model_max_length == 512 and len(ref) == 8192
+    for s in TEXTS:
+        want = tok.encode(s).ids
+        assert ref(s).input_ids == want, s                       # nothing added (no BOS / EOS)
+        assert ref.decode(want) == tok.decode(want, skip_special_tokens=False) == s, s
+    assert ref("The end.<|endoftext|>Once")["input_ids"].count(0) == 1   # EOS in text is the special token
+
+
+def test_export_generate_stops_on_our_eos(tmp_path):
+    """HF generate() on our export stops where ours does (LlamaConfig's default eos is 2, not ours)."""
+    ours = Transformer(SMALL).eval()
+    _scramble(ours, 6)
+    x = ids(B=1, T=6, seed=7)
+    free = generate(ours, x, 12, temperature=0)[0, 6:].tolist()
+    # Pretend the first not-yet-seen token after position 0 is EOS, so both must stop right there.
+    stop = next(i for i in range(1, len(free)) if free[i] not in free[:i])
+    eos = free[stop]
+    hl.save_as_hf(ours, tmp_path, eos_id=eos)
+    hf = LlamaForCausalLM.from_pretrained(tmp_path, dtype=torch.float32, attn_implementation="eager").eval()
+    assert hf.config.eos_token_id == eos and hf.config.bos_token_id is None
+    assert hf.generation_config.eos_token_id == eos and hf.generation_config.pad_token_id == eos
+    theirs = hf.generate(x, max_new_tokens=12, do_sample=False)
+    assert torch.equal(theirs, generate(ours, x, 12, temperature=0, eos_id=eos))
+    assert theirs.shape[1] == 6 + stop + 1 and theirs[0, -1].item() == eos
+
+
+def test_export_rejects_non_llama_layers(tmp_path):
+    m = Transformer(SMALL)
+    m.cfg = dataclasses.replace(SMALL, layer_types=("gdn", "gqa"))   # a future hybrid (no gdn layer exists yet)
+    with pytest.raises(ValueError, match="gdn"):
+        hl.save_as_hf(m, tmp_path)

@@ -113,23 +113,55 @@ def load_hf_llama(repo: str = TINYLLAMA, revision: str = TINYLLAMA_REV, device: 
     return load_from_dir(download(repo, revision, local_only), device, dtype)
 
 
-def save_as_hf(model: Transformer, path: str | Path) -> None:
-    """Write our model as an HF-style Llama directory (config.json + model.safetensors). Used by tests and 4.8b."""
+def save_as_hf(model: Transformer, path: str | Path, eos_id: int | None = None, bos_id: int | None = None) -> None:
+    """Write our model as an HF-style Llama directory (config.json, generation_config.json,
+    model.safetensors). Used by tests and 4.8b.
+
+    The token ids are written explicitly, even as null: a config without them gets LlamaConfig's
+    defaults (bos 1, eos 2), and HF generate() would then stop on the wrong token.
+    """
     from tinyllm.safetensors_io import save_file
+    c = model.cfg
+    other = sorted(set(c.layer_types) - {"mha", "gqa"})
+    if other:
+        raise ValueError(f"only mha / gqa layers map to Llama; this model has {other}")
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    c = model.cfg
+    sd = model.state_dict()
+    if c.tie_embeddings:
+        sd.pop("lm_head.weight")
+    dtype = str(next(iter(sd.values())).dtype).removeprefix("torch.")
+    ids = {"bos_token_id": bos_id, "eos_token_id": eos_id, "pad_token_id": None}
     hf = {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "hidden_act": "silu",
           "vocab_size": c.vocab_size, "max_position_embeddings": c.max_seq_len, "hidden_size": c.d_model,
           "num_hidden_layers": c.n_layers, "num_attention_heads": c.n_heads,
           "num_key_value_heads": c.n_kv_heads, "intermediate_size": c.ffn_hidden, "rms_norm_eps": c.norm_eps,
           "rope_theta": c.rope_theta, "initializer_range": c.init_std, "tie_word_embeddings": c.tie_embeddings,
-          "attention_bias": False, "rope_scaling": None}
+          "attention_bias": False, "rope_scaling": None, "dtype": dtype, **ids}
     (path / "config.json").write_text(json.dumps(hf, indent=2))
-    sd = model.state_dict()
-    if c.tie_embeddings:
-        sd.pop("lm_head.weight")
+    # Padding a batch with EOS (GPT-2 style); our model has no pad token.
+    (path / "generation_config.json").write_text(json.dumps({**ids, "pad_token_id": eos_id}, indent=2))
     save_file({ours_to_hf(k): v for k, v in sd.items()}, path / "model.safetensors", {"format": "pt"})
+
+
+def save_tokenizer_as_hf(path: str | Path, model_max_length: int | None = None) -> None:
+    """Our TinyStories BPE as an HF tokenizer directory (4.8b).
+
+    It was trained with the `tokenizers` library (D-007), so the file already is a tokenizer.json;
+    tokenizer_config.json only tells `AutoTokenizer` which class to use and which token is EOS.
+    Like our server: no BOS, nothing added on encode (the file has no post-processor), and no
+    "clean up" of spaces on decode, so decode(encode(text)) == text.
+    """
+    import shutil
+
+    from tinyllm.tokenizer import EOS, TOKENIZER_PATH
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(TOKENIZER_PATH, path / "tokenizer.json")
+    cfg = {"tokenizer_class": "PreTrainedTokenizerFast", "eos_token": EOS, "bos_token": None,
+           "unk_token": None, "pad_token": EOS, "add_bos_token": False, "add_eos_token": False,
+           "clean_up_tokenization_spaces": False, "model_max_length": model_max_length}
+    (path / "tokenizer_config.json").write_text(json.dumps(cfg, indent=2))
 
 
 # --- tokenizer -------------------------------------------------------------------------------------

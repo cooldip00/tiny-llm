@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
 - **Step:** 4.11b CUDA graphs in the continuous engine, starting 2026-11-06 (D-027, ~1 day), then 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-027: 4.11b → 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
-- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025). _Step 2 done 2026-11-06 (see the log)._ **Next action:** 4.13 step 3: SLOs in docs/SERVING.md first, then `scripts/load_test.py`. _Step 3 done 2026-11-06 (see the log); the vLLM run of the same load test is part of 4.8a._ **Next action:** 4.8a, TinyLlama on vLLM / llama.cpp with the same `load_test.py`. _4.8a done 2026-11-06, which also closes 4.13 (see the log)._ **Next action:** 4.8b, export the 30M model to HF Llama format, then 6.8.
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025). _Step 2 done 2026-11-06 (see the log)._ **Next action:** 4.13 step 3: SLOs in docs/SERVING.md first, then `scripts/load_test.py`. _Step 3 done 2026-11-06 (see the log); the vLLM run of the same load test is part of 4.8a._ **Next action:** 4.8a, TinyLlama on vLLM / llama.cpp with the same `load_test.py`. _4.8a done 2026-11-06, which also closes 4.13 (see the log)._ **Next action:** 4.8b, export the 30M model to HF Llama format, then 6.8. _4.8b done 2026-11-06 (see the log)._ **Next action:** 6.8, one-command tables.
 - _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -19,6 +19,27 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-06 — 4.8b: our 30M model exported to HF Llama format
+- Pushed `e336501` (4.8a): CI green.
+- Most of the model side existed from 4.9c (`save_as_hf`, HF loads our export with matching logits on random small models). New:
+  - **Bug fixed:** `save_as_hf` wrote no token ids, so HF used LlamaConfig's defaults (bos 1, eos 2) and its `generate()` would stop on the wrong token. It now writes `eos_token_id` / `bos_token_id` (null when absent) to `config.json` and a `generation_config.json` (pad = EOS). It also refuses layer types other than mha / gqa.
+  - `save_tokenizer_as_hf`: our tokenizer was trained with `tokenizers` (D-007), so the file already is a `tokenizer.json`. The added `tokenizer_config.json` sets `PreTrainedTokenizerFast` and EOS `<|endoftext|>` (id 0), with no BOS (like our server) and no space clean-up on decode.
+  - `scripts/export_hf.py`: `checkpoints/main/best.pt` → `runs/export/tinystories-30m/` (git-ignored; 119.6 MB fp32 safetensors + tokenizer). Then it verifies on CPU in fp32 against HF Transformers (reference only, D-015) and writes `runs/export/tinystories-30m-verify.json` with provenance.
+  - 3 CPU tests (they run in CI): the exported tokenizer gives our ids and text back (leading spaces, Unicode, EOS in text); HF `generate()` stops on our eos id; non-Llama layers are refused. Full suite **284 passed**.
+- **Verification** (step 7599, val loss 1.282; 30M params, tied embeddings):
+
+  | Check | Result |
+  |---|---|
+  | Logits, full forward (16 validation stories, 2,741 positions) | max abs diff 1.4e-5, top-1 agreement 100%, KL ≈ 0 |
+  | Logits, prefill 8 + cached decode | max abs diff 1.0e-5, top-1 agreement 100% |
+  | Greedy generation, 8 unseen prompts, ≤ 200 new tokens | 8/8 identical to HF `generate()`; 7 stopped at EOS |
+  | Tokenizer, whole validation split (21,981 stories, 4.66 M tokens) | 0 id mismatches, 0 decode mismatches |
+  | Round trip through our `load_from_dir` | identical weights |
+
+  - So the export is a standard Llama: anyone can use it with `AutoModelForCausalLM` / `AutoTokenizer`, without our code.
+- Not done: GGUF (stretch; llama.cpp's converter identifies BPE tokenizers by a fingerprint and won't know ours). Uploading to the Hub with a model card is 6.5b. Parked: let our server load the exported folder (PARKING_LOT 2026-11-06).
+- **Next:** 6.8, one-command tables.
 
 ### 2026-11-06 — 4.8a: TinyLlama on ours vs vLLM vs llama.cpp (closes 4.13)
 - `scripts/load_test.py --sequential N --weight-bytes B`: one request at a time; decode tok/s excluding the first token, as a % of the bandwidth ceiling (423 GB/s ÷ weight bytes). 2 tests (summary logic; a live sequential run against the tiny server). Full suite **281 passed**.
