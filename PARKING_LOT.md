@@ -60,12 +60,14 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
      - tok/s against the bandwidth ceiling by engine (B=1)
      - throughput vs batch size
      - the training val-loss curve
+     - _Done 2026-11-06 in PLAN 6.2 (D-030), plus a serving plot and a decode-step profile in RESULTS.md._
   2. A short demo GIF of streaming generation (TinyLlama, KV + graphs).
   3. A link to the HF Space once 6.5b is up.
   4. A link to the blog post (6.5d).
   5. A GitHub social preview image (Settings → Social preview).
   6. A "What I learned / design decisions" section linking the key D-xxx entries.
   7. Plain-language explainers for non-specialists: what a KV cache is and why decode is memory-bound.
+- [2026-11-06] **Animated paged-KV explainer** (from 6.2). An animation (SVG/JS or a short video) of requests arriving, taking KV blocks from the pool through their block tables, finishing and freeing them, next to contiguous slots wasting their reserved tail. It needs JavaScript or video, so it can't live in the README (D-030); it belongs in the blog post or on the Space — 6.5d / v1.1.
 - [2026-11-06] **Docker Space** — run the HF Space as a Docker Space with the same image as the local server, so "it works on my machine" and "it works on the Space" are one claim. Also gives a one-line `docker run` in the README — 6.5b.
   - _Promoted to PLAN 6.5b (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **CI smoke deploy** — a CI job that builds the image, starts the server on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion. It catches packaging breaks before the Space does — 6.5b / 6.7.

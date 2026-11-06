@@ -328,3 +328,19 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - **Throttle rule narrowed:** flag a hardware slowdown (`hw_slowdown`, `hw_thermal_slowdown`, `hw_power_brake_slowdown`), or a busy SM clock median below 1,400 MHz *together with* `sw_thermal_slowdown`. A low clock alone is not throttling: small or host-bound steps leave the GPU idle and it clocks down by itself (30M KV decode: 1,095 MHz median at 65 °C, no thermal reason). The old rule flagged 5 of 14 benchmarks; the new one flags 2, both reproduced by a rerun after cooling to ≤ 50 °C.
   - **Reruns are stated:** `--only` reruns into the same directory are marked in `manifest.json`, and RESULTS.md lists each one with its finish time and start temperature, so "one run" is never claimed for a number that came later.
   - **Allocator:** the two naive benchmarks run with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (their full forward grows each step and fragments the caching allocator; first run crashed in cuBLAS). Recorded per benchmark in the manifest and `run.log`.
+
+### D-030 — Plots: static SVGs drawn by bench_all from the same run as the tables · ACCEPTED (2026-11-06). How 6.2 is done
+- **Context:** 6.2 asked for plots of loss curves, inference speedups and ablation trade-offs. The README is the first thing a reader sees, and GitHub strips JavaScript and iframes from it. The ablation (5.5) hasn't run yet. `checkpoints/` (with `train.log`) is git-ignored.
+- **Choice:**
+  - `src/tinyllm/plots.py` draws five plots with matplotlib (a dev dependency, version pinned by `uv.lock`). `scripts/bench_all.py` writes them to `docs/img/` whenever it renders the tables, from the same `runs/bench/v1/` JSON, so a plot never disagrees with its table.
+  - README: TinyLlama decode at batch 1 against the bandwidth ceiling (top of Highlights), decode throughput vs batch size, and the training loss curve. RESULTS.md: those two, the serving comparison, and the decode-step profile (why CUDA graphs help).
+  - One transparent SVG per plot, readable on GitHub's light and dark themes: mid-gray text, blue = ours, orange = HF, gray = context; the colour pair is checked for colour-vision deficiency on both backgrounds. Every mark carries its value as text, and each embed has alt text with the plotted numbers.
+  - Byte-identical re-renders (fixed SVG hash salt, no date, text as paths), so `bench_all.py` leaves git clean when nothing changed.
+  - The training curve comes from `docs/data/train_curve.json` (11 KB, made by `scripts/extract_train_curve.py` from `train.log`, with the log's SHA-256), so it can be redrawn from the repo. `.gitignore` re-includes `docs/data/`.
+  - Ablation plots move to 5.5, which produces their data.
+- **Why:** static images are what a README can show; generating them from the tables' JSON keeps one source of truth; one SVG for both themes is half the files and can't drift.
+- **Rejected:**
+  - Interactive plots (Plotly, Vega): the README can't run them; maybe later on a blog, the Space or Pages.
+  - Mermaid `xychart`: no log scale, no value labels, limited styling.
+  - W&B screenshots: not reproducible from the repo, and they need the account.
+  - Separate light and dark images in a `<picture>` element: two files per plot for no gain over a transparent SVG.

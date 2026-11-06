@@ -6,6 +6,8 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 
 **Highlights**
 <!-- bench:highlights -->
+![Bar chart, TinyLlama 1.1B decode at batch 1: HF Transformers generate 44 tok/s; Ours, naive 31 tok/s; Ours, KV cache 48 tok/s; Ours, KV cache + CUDA graphs 127 tok/s; bandwidth ceiling 192 tok/s](docs/img/decode_b1.svg)
+
 - **TinyLlama 1.1B decodes at 127 tok/s at batch 1: 66% of the bandwidth ceiling, 2.9× HF `generate`** (KV cache + CUDA graphs).
 - **Our engine's logits are bit-identical to HF Transformers** in bf16 on TinyLlama, prefill and cached decode.
 - **Serving:** continuous batching gives 1.38× static batching. A paged KV cache fits 25 sequences where contiguous slots fit 8, for 1.62× the throughput in the same memory.
@@ -30,6 +32,8 @@ Decode speed at batch 1 with a 128-token prompt, 256 new tokens, median of 5 run
 - **Batching:** with graphs, 814 tok/s at batch 8 and 1,984 tok/s at batch 32 (HF: 359 and 1,440).
 - **INT8 weights:** val loss +0.0010, 98.5% argmax agreement with bf16; decode is 0.75× bf16 at batch 1, 0.36× at batch 32. Slower, not faster: the weight is cast back to bf16 on every call, so each step moves more bytes, not fewer. A fused dequantize-and-multiply kernel fixes this; it's on the roadmap.
 - **Correctness:** bf16 logits equal HF's bf16 logits exactly (`torch.equal`) at all 415 test positions. Every top-1 disagreement with fp32 is a near-tie (margin ≤ 0.019 logits).
+
+![Line chart, decode tok/s at batch 1, 8, 32: ours with CUDA graphs 127, 814, 1,984; HF Transformers 44, 359, 1,440; log scales, with the bandwidth ceiling times batch size](docs/img/batch_scaling.svg)
 <!-- /bench:tinyllama -->
 
 Full tables from the same run, with GPU clocks and temperatures: [docs/RESULTS.md](docs/RESULTS.md). The method, caveats and the dated results of each step: [docs/INFERENCE.md](docs/INFERENCE.md).
@@ -59,6 +63,8 @@ The paged cache stores KV in fixed-size blocks through a per-sequence block tabl
 | Time | 2 h 27 min on the laptop GPU |
 | Throughput | 115K tok/s, **56% MFU** (torch.compile: +57% over eager) |
 | Final val loss | 1.2825 (train 1.280: no overfitting) |
+
+![Line chart: training and validation loss of the 30M model over 996M tokens, falling from 9.0 to a final validation loss of 1.2825, with train and validation loss close together throughout](docs/img/train_loss.svg)
 
 Sample after training, prompted with "Once upon a time": *"…a little girl named Lily. She was very curious… she found a shiny rock that looked like it was magic… she saw a butterfly that was also very shiny…"*
 
@@ -106,8 +112,8 @@ flowchart LR
 | `src/tinyllm/quant.py` | INT8 weight-only quantization |
 | `src/tinyllm/hf_llama.py`, `safetensors_io.py` | Loads Llama-format checkpoints (TinyLlama) and exports to them |
 | `scripts/` | Data, tokenizer and benchmark scripts |
-| `tests/` | 293 tests: every optimized path is checked against the slow reference path |
-| `docs/` | Architecture, inference results, hardware, setup log |
+| `tests/` | 297 tests: every optimized path is checked against the slow reference path |
+| `docs/` | Architecture, inference results, hardware, setup log; `docs/img/` holds the plots, drawn by `scripts/bench_all.py` |
 
 ## Reproduce
 

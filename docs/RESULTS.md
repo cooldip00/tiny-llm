@@ -30,6 +30,8 @@ Every number on this page comes from **one** run of `scripts/bench_all.py --run`
 
 _Heat (busy SM clock median, peak GPU temperature, throttle reasons): hf: 1,875 MHz (min 1,230), 86 °C, sw_power_cap + sw_thermal_slowdown; naive: 1,500 MHz (min 525), 85 °C, sw_power_cap + sw_thermal_slowdown; kv: 1,875 MHz (min 1,170), 86 °C, sw_power_cap + sw_thermal_slowdown; kv-graph: 1,515 MHz (min 585), 84 °C, sw_thermal_slowdown._
 
+![Bar chart, TinyLlama 1.1B decode at batch 1: HF Transformers generate 44 tok/s; Ours, naive 31 tok/s; Ours, KV cache 48 tok/s; Ours, KV cache + CUDA graphs 127 tok/s; bandwidth ceiling 192 tok/s](img/decode_b1.svg)
+
 ### Decode by batch size and prompt length
 
 | Engine | Batch | P=32 | P=128 | P=512 |
@@ -46,6 +48,8 @@ _Heat (busy SM clock median, peak GPU temperature, throttle reasons): hf: 1,875 
 | Ours, KV cache + CUDA graphs | 32 | 2,332 (38%) | 1,984 (32%) | 1,214 (20%) |
 
 Decode tok/s, with the % of the bandwidth ceiling at that batch size. — = skipped: prompt + new tokens exceed the context, which a KV cache can't slide.
+
+![Line chart, decode tok/s at batch 1, 8, 32: ours with CUDA graphs 127, 814, 1,984; HF Transformers 44, 359, 1,440; log scales, with the bandwidth ceiling times batch size](img/batch_scaling.svg)
 
 ### INT8 weights (per-row, cast back to bf16 per call)
 
@@ -134,6 +138,8 @@ Paged rows: `paged/<block size>`, all within the 8-slot contiguous cache's KV me
 
 _Heat (busy SM clock median, peak GPU temperature, throttle reasons): 30m-serving: ⚠ 1,268 MHz (min 945), 84 °C, sw_power_cap + sw_thermal_slowdown._
 
+![Bar chart, serving tok/s. TinyLlama, 8 slots: static 189, continuous 261, continuous with CUDA graphs 581. 30M model, same KV memory: contiguous 8 sequences 615, paged 25 sequences 998](img/serving.svg)
+
 ### INT8 weights
 
 | Batch | fp32 tok/s | bf16 tok/s | int8 tok/s | bf16 / fp32 | int8 / fp32 |
@@ -159,3 +165,5 @@ _Heat (busy SM clock median, peak GPU temperature, throttle reasons): 30m-int8: 
 | 30M | graph | 1.16 | 0.32 | 1.10 | 9% | 864 | 12% |
 
 _Heat (busy SM clock median, peak GPU temperature, throttle reasons): TinyLlama: 1,350 MHz (min 210), 76 °C, no throttling; 30M: 1,410 MHz (min 210), 63 °C, no throttling._
+
+![Bar chart, share of a TinyLlama decode step the GPU is idle: eager 76% (28.5 ms per step), CUDA graph 3% (7.9 ms per step)](img/decode_profile.svg)

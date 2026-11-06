@@ -132,7 +132,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [ ] 5.2 Implement variants: `mla`, `gdn_hybrid` (via `fla`). `gqa` already exists from 4.9a
 - [ ] 5.3 Run every variant × 2–3 seeds
 - [ ] 5.4 Measure: val loss, KV-cache bytes per token, decode tok/s at 512 / 2k / 8k context
-- [ ] 5.5 Plots and analysis, including threats to validity
+- [ ] 5.5 Plots and analysis, including threats to validity (the ablation trade-off plots moved here from 6.2, D-030: add them to `tinyllm.plots`)
 
 **Done when:** the results table in docs/RESEARCH.md is complete and the plots are saved.
 
@@ -141,11 +141,11 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ## Phase 6 — Writeup
 - [ ] 6.1 README: what, why, results, how to reproduce
   - a serving architecture diagram (D-028 amendment, ~20 min, after 4.13): client → router → engine thread → slots / KV, and where each metric is measured; also in docs/SERVING.md
-- [ ] 6.2 Plots: loss curves, inference speedups, ablation trade-offs
+- [x] 6.2 Plots: loss curves, inference speedups, ablation trade-offs. _Done 2026-11-06 (D-030): five SVGs in `docs/img/`, drawn by `bench_all.py` from the run behind the tables; three in the README, four in RESULTS.md. The ablation plots moved to 5.5._
 - [ ] 6.3 3–4 resume bullets with real numbers
 - [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
 - [ ] 6.5 Publish (added by D-021), in this order:
-  - [ ] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1)._
+  - [ ] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1). Plots added 2026-11-06 (6.2); pinning is still to do._
   - [ ] 6.5b Hugging Face: our model with a model card, plus a small Gradio Space demo
     - _D-028 (2026-11-06; design in [docs/SERVING.md](docs/SERVING.md)), about +2–3 h:_
       - The Space runs our FastAPI server (same code as 4.13) with the demo page mounted on it. The 30M model is framed as story continuation (a TinyStories base model), with example openings.

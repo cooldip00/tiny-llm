@@ -362,8 +362,9 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
         "### Decode at batch 1", "",
         f"128-token prompt, 256 new tokens, {repeats_note(hf)}. Ceiling: {ceiling_note(hf)}.", "",
         tl_b1_table(data), "", heat_line(data, [n_ for n_, _ in tl_gen], ["hf", "naive", "kv", "kv-graph"]),
+        "", img("img/decode_b1.svg", b1_alt(data)),
         "", "### Decode by batch size and prompt length", "",
-        decode_grid(data, tl_gen), "",
+        decode_grid(data, tl_gen), "", img("img/batch_scaling.svg", scaling_alt(data)), "",
         "", "### INT8 weights (per-row, cast back to bf16 per call)", "",
         int8_section(data["tl-int8"]), "", heat_line(data, ["tl-int8"]),
         "", "### Serving: static vs continuous batching, with and without CUDA graphs", "",
@@ -379,11 +380,13 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
         "", "### Serving: static, continuous, CUDA graphs, paged KV", "",
         "Paged rows: `paged/<block size>`, all within the 8-slot contiguous cache's KV memory.", "",
         serving_table(data["30m-serving"]), "", heat_line(data, ["30m-serving"]),
+        "", img("img/serving.svg", serving_alt(data)),
         "", "### INT8 weights", "",
         int8_section(data["30m-int8"]), "", heat_line(data, ["30m-int8"]),
         "", "## Decode-step profile (batch 1, 128-token context)", "",
         profile_table([("TinyLlama 1.1B", data["tl-profile"]), ("30M", data["30m-profile"])]), "",
         heat_line(data, ["tl-profile", "30m-profile"], ["TinyLlama", "30M"]),
+        "", img("img/decode_profile.svg", profile_alt(data)),
     ]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(parts)) + "\n"
 
@@ -393,6 +396,50 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
 
 def _ratio(x: float, d: int = 2) -> str:
     return f"{x:.{d}f}×"
+
+
+# ---------------------------------------------------------------- plot embeds (6.2, D-030)
+# The SVGs come from tinyllm.plots via bench_all.py; the alt text carries the plot's numbers.
+
+
+def img(path: str, alt: str) -> str:
+    return f"![{alt}]({path})"
+
+
+def _tl(data: dict, nm: str, b: int) -> dict:
+    return need(data[nm]["rows"], nm, batch=b, prompt_len=128)
+
+
+def b1_alt(data: dict) -> str:
+    hf = data["tl-hf"]
+    return ("Bar chart, TinyLlama 1.1B decode at batch 1: " + "; ".join(
+        f"{lab.split(' (')[0].replace('`', '')} {n(_tl(data, nm, 1)['decode_tok_s'])} tok/s" for nm, lab in TL_ENGINES)
+        + f"; bandwidth ceiling {n(hf['bandwidth_bytes_s'] / hf['weight_bytes'])} tok/s")
+
+
+def scaling_alt(data: dict) -> str:
+    bs = sorted({r["batch"] for r in data["tl-kv-graph"]["rows"]} & {r["batch"] for r in data["tl-hf"]["rows"]})
+    per = lambda nm: ", ".join(n(_tl(data, nm, b)["decode_tok_s"]) for b in bs)   # noqa: E731
+    return (f"Line chart, decode tok/s at batch {', '.join(map(str, bs))}: ours with CUDA graphs {per('tl-kv-graph')}; "
+            f"HF Transformers {per('tl-hf')}; log scales, with the bandwidth ceiling times batch size")
+
+
+def serving_alt(data: dict) -> str:
+    tls, ms = data["tl-serving"]["rows"], data["30m-serving"]["rows"]
+    tok = lambda rows, nm, **kv: n(need(rows, nm, **kv)["tok_s"])                 # noqa: E731
+    pg = need(ms, "30m-serving", engine=PAGED_ROW[0], size=PAGED_ROW[1])
+    return ("Bar chart, serving tok/s. TinyLlama, 8 slots: static " + tok(tls, "tl-serving", engine="static", size=8)
+            + ", continuous " + tok(tls, "tl-serving", engine="continuous", size=8)
+            + ", continuous with CUDA graphs " + tok(tls, "tl-serving", engine="cont+graph", size=8)
+            + ". 30M model, same KV memory: contiguous 8 sequences " + tok(ms, "30m-serving", engine="continuous", size=8)
+            + f", paged {pg['peak_active']} sequences {n(pg['tok_s'])}")
+
+
+def profile_alt(data: dict) -> str:
+    m = data["tl-profile"]["modes"]
+    return ("Bar chart, share of a TinyLlama decode step the GPU is idle: "
+            f"eager {m['eager']['gpu_idle_frac']:.0%} ({m['eager']['ms_per_step']:.1f} ms per step), "
+            f"CUDA graph {m['graph']['gpu_idle_frac']:.0%} ({m['graph']['ms_per_step']:.1f} ms per step)")
 
 
 def readme_blocks(data: dict) -> dict[str, str]:
@@ -416,6 +463,8 @@ def readme_blocks(data: dict) -> dict[str, str]:
                  f"**Our engine's bf16 logits match HF Transformers to within {max_d:.2g}** on TinyLlama, "
                  "prefill and cached decode.")
     highlights = "\n".join([
+        img("docs/img/decode_b1.svg", b1_alt(data)),
+        "",
         f"- **TinyLlama 1.1B decodes at {n(kvg1['decode_tok_s'])} tok/s at batch 1: "
         f"{kvg1['pct_of_ceiling']:.0f}% of the bandwidth ceiling, "
         f"{_ratio(kvg1['decode_tok_s'] / hf1['decode_tok_s'], 1)} HF `generate`** (KV cache + CUDA graphs).",
@@ -465,6 +514,8 @@ def readme_blocks(data: dict) -> dict[str, str]:
         f"and {n(at('tl-hf', 32)['decode_tok_s'])}).",
         int8_text,
         corr,
+        "",
+        img("docs/img/batch_scaling.svg", scaling_alt(data)),
     ])
 
     w = data["tl-serving"]["workload"]
