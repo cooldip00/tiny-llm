@@ -161,130 +161,223 @@ def run_static(model: Transformer, requests: list[Request], batch_size: int,
     return results, stats.summary(results)
 
 
+@dataclass
+class Event:
+    """One generated token, as step() reports it (a server streams these)."""
+    rid: int
+    token: int
+    done: bool                 # the request finished with this token (EOS or max_new_tokens)
+
+
+class ContinuousEngine:
+    """Step 4.13: run_continuous's loop as an object, so requests can arrive while others
+    decode. add_request() queues a request at any time; each step() admits queued requests
+    into free slots (one padded prefill), decodes one token for every active slot and
+    returns the new tokens as Events. A finished request's Result is in `results` (pop it).
+
+    Times are seconds on the engine clock (since construction). TTFT and latency count from
+    the request's arrival, so with every request added at once they match 4.4's numbers.
+    Sampling settings are per engine. Not thread-safe: call add_request / step / abort from
+    one thread.
+
+    kv="slots": SlotKVCache, every slot reserves max_len positions (4.4).
+    kv="paged": PagedKVCache with kv_blocks blocks of block_size tokens (4.5). Default
+    kv_blocks = the same memory as the slot cache. Sequences beyond what the blocks hold are
+    preempted and recomputed later.
+    cuda_graph (4.11b, CUDA, kv="slots" only): the decode step is replayed as a CUDA graph per
+    attention-window bucket (cuda_graph.SlotGraphDecoder); prefill stays eager. True builds a
+    decoder for this engine; pass a SlotGraphDecoder to reuse its cache and captured graphs.
+    """
+
+    def __init__(self, model: Transformer, n_slots: int, max_len: int | None = None,
+                 temperature: float = 0.0, top_k=None, top_p=None, generator=None,
+                 kv: str = "slots", block_size: int = 16, kv_blocks: int | None = None,
+                 cuda_graph=False, buckets: tuple[int, ...] | None = None):
+        model.eval()
+        cfg = model.cfg
+        self.model = model
+        self.device = device = next(model.parameters()).device
+        self.n_slots = n_slots
+        self.max_len = max_len = max_len or cfg.max_seq_len
+        self.pick = dict(temperature=temperature, top_k=top_k, top_p=top_p, generator=generator)
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        if cuda_graph is not False and kv != "slots":
+            raise ValueError("cuda_graph supports kv='slots' only (paged: not yet)")
+        self.decoder = None
+        if cuda_graph is not False and not isinstance(cuda_graph, bool):   # a SlotGraphDecoder
+            self.decoder, slots = cuda_graph, cuda_graph.slots
+            if slots.n_slots != n_slots or slots.max_len != max_len or any(slots.active):
+                raise ValueError(f"decoder cache has {slots.n_slots} slots of {slots.max_len} "
+                                 f"(active: {sum(slots.active)}); need {n_slots} idle slots of {max_len}")
+        elif kv == "slots":
+            slots = SlotKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, max_len, dtype, device)
+        elif kv == "paged":
+            from tinyllm.paged_kv import PagedKVCache
+            n_blocks = kv_blocks or n_slots * math.ceil(max_len / block_size)
+            slots = PagedKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, n_blocks,
+                                 block_size, max_len, dtype, device)
+        else:
+            raise ValueError(f"kv must be 'slots' or 'paged', got {kv!r}")
+        if cuda_graph is True:
+            from tinyllm.cuda_graph import SlotGraphDecoder
+            self.decoder = SlotGraphDecoder(model, slots, buckets=buckets)
+        self.slots = slots
+        self.stats = Stats(kv_bytes_per_token=_kv_bytes_per_token(model, device),
+                           kv_reserved_tokens=slots.reserved_tokens())
+        self.results: dict[int, Result] = {}              # finished, until the caller pops them
+        self._req: dict[int, Request] = {}                # unfinished requests only
+        self._arrival: dict[int, float] = {}
+        self._outs: dict[int, list[int]] = {}
+        self._ttft: dict[int, float] = {}
+        self._slot_req: list[int | None] = [None] * n_slots
+        self._last_tok = torch.zeros(n_slots, 1, dtype=torch.long, device=device)
+        self._queue: deque[int] = deque()
+        self._next_id = 0
+        self._t0 = time.perf_counter()
+
+    # -- public API ------------------------------------------------------------
+    def now(self) -> float:
+        return time.perf_counter() - self._t0
+
+    def add_request(self, req: Request) -> int:
+        """Queue a request; returns its id. Raises at once if it can never fit a slot."""
+        if not req.prompt or req.max_new_tokens < 1:
+            raise ValueError("a request needs a non-empty prompt and max_new_tokens >= 1")
+        if len(req.prompt) + req.max_new_tokens > self.max_len:
+            raise ValueError(f"prompt {len(req.prompt)} + new {req.max_new_tokens} "
+                             f"exceeds slot max_len {self.max_len}")
+        rid, self._next_id = self._next_id, self._next_id + 1
+        self._req[rid] = req
+        self._arrival[rid] = self.now()
+        self._queue.append(rid)
+        return rid
+
+    def has_work(self) -> bool:
+        return bool(self._queue) or any(self.slots.active)
+
+    def abort(self, rid: int) -> bool:
+        """Drop an unfinished request (e.g. its client went away), freeing its slot.
+        Returns False if it is unknown or already finished. No Result is kept."""
+        if rid not in self._req:
+            return False
+        if rid in self._queue:
+            self._queue.remove(rid)
+        if rid in self._slot_req:
+            s = self._slot_req.index(rid)
+            self._slot_req[s] = None
+            self.slots.release(s)
+        self._forget(rid)
+        return True
+
+    @torch.no_grad()
+    def step(self) -> list[Event]:
+        """Admit what fits, decode one token per active slot. Returns the new tokens."""
+        events: list[Event] = []
+        slots = self.slots
+        free = slots.free_slots()
+        rids: list[int] = []
+        if free and self._queue:                              # admit newcomers: one padded prefill
+            q = self._queue
+            if not self._fits_padded([q[0]]):
+                r = q[0]
+                raise ValueError(f"request {r}: prompt {len(self._context(r))} + new {self._left(r)} "
+                                 f"exceeds slot max_len {self.max_len}")
+            while (q and len(rids) < len(free) and self._fits_padded(rids + [q[0]])
+                   and slots.can_admit([len(self._context(r)) for r in rids + [q[0]]])):
+                rids.append(q.popleft())
+            if not rids and not any(slots.active):
+                raise ValueError(f"request {q[0]} does not fit in the KV cache even alone")
+        if rids:
+            prompts = [self._context(r) for r in rids]
+            L = max(len(p) for p in prompts)
+            logits, pre, pad = prefill_padded(self.model, prompts, max_len=L)
+            nxt = sample_next(logits, **self.pick)
+            taken = free[:len(rids)]
+            slots.admit(taken, pre, pad)
+            self._last_tok[torch.tensor(taken, device=self.device)] = nxt
+            toks = nxt.squeeze(-1).tolist()
+            now = self.now()
+            for s, rid, t in zip(taken, rids, toks):
+                self._slot_req[s] = rid
+                self._outs.setdefault(rid, [])
+                events.append(self._record(s, rid, t, now))
+        for s in slots.reserve_step():                        # paged: out of blocks → preempt newest
+            self._queue.appendleft(self._slot_req[s])         # recompute later from its context
+            self._slot_req[s] = None
+            self.stats.preemptions += 1
+        if not any(slots.active):
+            return events
+        st = self.stats
+        live = [s for s in range(self.n_slots) if slots.active[s]]
+        st.peak_active = max(st.peak_active, len(live))
+        st.decode_steps += 1
+        st.computed_rows += self.n_slots
+        st.useful_rows += len(live)
+        used = slots.used_tokens()
+        st.kv_used_frac.append(used / slots.reserved_tokens())
+        st.kv_alloc_frac.append(used / max(1, slots.allocated_tokens()))
+        if self.decoder is not None:
+            logits = self.decoder.step(self._last_tok)        # static buffer: sample at once
+        else:
+            with _autocast(self.device):
+                logits, _ = self.model(self._last_tok, cache=slots)   # one token per slot
+        self._last_tok = sample_next(logits[:, -1], **self.pick)
+        toks = self._last_tok.squeeze(-1).tolist()
+        now = self.now()
+        for s in live:
+            events.append(self._record(s, self._slot_req[s], toks[s], now))
+        return events
+
+    # -- internals -------------------------------------------------------------
+    def _context(self, rid: int) -> list[int]:
+        """Prompt plus tokens generated so far (non-empty only after a preemption)."""
+        return self._req[rid].prompt + self._outs.get(rid, [])
+
+    def _left(self, rid: int) -> int:
+        return self._req[rid].max_new_tokens - len(self._outs.get(rid, []))
+
+    def _fits_padded(self, rids: list[int]) -> bool:
+        """Every row of a padded prefill sits at positions up to L + its remaining tokens, so
+        that must fit max_len (the RoPE table, and slot storage). A preempted request comes back
+        with a longer context, so this can fail for a batch even when each request fits alone."""
+        return max(len(self._context(r)) for r in rids) + max(self._left(r) for r in rids) <= self.max_len
+
+    def _record(self, s: int, rid: int, tok: int, now: float) -> Event:
+        outs = self._outs[rid]
+        outs.append(tok)
+        if len(outs) == 1:
+            self._ttft[rid] = now
+        done = _done(self._req[rid], outs)
+        if done:
+            t_in = self._arrival[rid]
+            self.results[rid] = Result(outs, self._ttft[rid] - t_in, now - t_in)
+            self.stats.useful_tokens += len(outs)
+            self._slot_req[s] = None
+            self.slots.release(s)
+            self._forget(rid)
+        return Event(rid, tok, done)
+
+    def _forget(self, rid: int) -> None:
+        for d in (self._req, self._arrival, self._outs, self._ttft):
+            d.pop(rid, None)
+
+
 @torch.no_grad()
 def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
                    max_len: int | None = None, temperature: float = 0.0, top_k=None,
                    top_p=None, generator=None, kv: str = "slots", block_size: int = 16,
                    kv_blocks: int | None = None, cuda_graph=False,
                    buckets: tuple[int, ...] | None = None) -> tuple[list[Result], dict]:
-    """kv="slots": SlotKVCache, every slot reserves max_len positions (4.4).
-    kv="paged": PagedKVCache with kv_blocks blocks of block_size tokens (4.5). Default
-    kv_blocks = the same memory as the slot cache. Sequences beyond what the blocks hold are
-    preempted and recomputed later.
-    cuda_graph (4.11b, CUDA, kv="slots" only): the decode step is replayed as a CUDA graph per
-    attention-window bucket (cuda_graph.SlotGraphDecoder); prefill stays eager. True builds a
-    decoder for this call; pass a SlotGraphDecoder to reuse its cache and captured graphs
-    across calls (benchmarks, a server)."""
-    model.eval()
-    cfg = model.cfg
-    device = next(model.parameters()).device
-    max_len = max_len or cfg.max_seq_len
-    pick = dict(temperature=temperature, top_k=top_k, top_p=top_p, generator=generator)
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    if cuda_graph is not False and kv != "slots":
-        raise ValueError("cuda_graph supports kv='slots' only (paged: not yet)")
-    decoder = None
-    if cuda_graph is not False and not isinstance(cuda_graph, bool):   # a SlotGraphDecoder
-        decoder, slots = cuda_graph, cuda_graph.slots
-        if slots.n_slots != n_slots or slots.max_len != max_len or any(slots.active):
-            raise ValueError(f"decoder cache has {slots.n_slots} slots of {slots.max_len} "
-                             f"(active: {sum(slots.active)}); need {n_slots} idle slots of {max_len}")
-    elif kv == "slots":
-        slots = SlotKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, max_len, dtype, device)
-    elif kv == "paged":
-        from tinyllm.paged_kv import PagedKVCache
-        n_blocks = kv_blocks or n_slots * math.ceil(max_len / block_size)
-        slots = PagedKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, n_blocks,
-                             block_size, max_len, dtype, device)
-    else:
-        raise ValueError(f"kv must be 'slots' or 'paged', got {kv!r}")
-    if cuda_graph is True:
-        from tinyllm.cuda_graph import SlotGraphDecoder
-        decoder = SlotGraphDecoder(model, slots, buckets=buckets)
-    stats = Stats(kv_bytes_per_token=_kv_bytes_per_token(model, device),
-                  kv_reserved_tokens=slots.reserved_tokens())
-    results: list[Result | None] = [None] * len(requests)
-    outs: dict[int, list[int]] = {}
-    ttft: dict[int, float] = {}
-    slot_req: list[int | None] = [None] * n_slots
-    last_tok = torch.zeros(n_slots, 1, dtype=torch.long, device=device)
-    queue = deque(range(len(requests)))
+    """Offline continuous batching (4.4): every request queued at t=0, run to completion.
+    A thin wrapper over ContinuousEngine; see it for kv / cuda_graph."""
+    eng = ContinuousEngine(model, n_slots, max_len, temperature, top_k, top_p, generator,
+                           kv, block_size, kv_blocks, cuda_graph, buckets)
     t0 = time.perf_counter()
-
-    def context(rid: int) -> list[int]:
-        """Prompt plus tokens generated so far (non-empty only after a preemption)."""
-        return requests[rid].prompt + outs.get(rid, [])
-
-    def record(s: int, rid: int, tok: int, now: float) -> None:
-        outs[rid].append(tok)
-        if len(outs[rid]) == 1:
-            ttft[rid] = now
-        if _done(requests[rid], outs[rid]):
-            results[rid] = Result(outs[rid], ttft[rid], now)
-            slot_req[s] = None
-            slots.release(s)
-
-    def left(rid: int) -> int:
-        return requests[rid].max_new_tokens - len(outs.get(rid, []))
-
-    def fits_padded(rids: list[int]) -> bool:
-        """Every row of a padded prefill sits at positions up to L + its remaining tokens, so
-        that must fit max_len (the RoPE table, and slot storage). A preempted request comes back
-        with a longer context, so this can fail for a batch even when each request fits alone."""
-        return max(len(context(r)) for r in rids) + max(left(r) for r in rids) <= max_len
-
-    while queue or any(slots.active):
-        free = slots.free_slots()
-        rids: list[int] = []
-        if free and queue:                                    # admit newcomers: one padded prefill
-            if not fits_padded([queue[0]]):
-                r = queue[0]
-                raise ValueError(f"request {r}: prompt {len(context(r))} + new {left(r)} "
-                                 f"exceeds slot max_len {max_len}")
-            while (queue and len(rids) < len(free) and fits_padded(rids + [queue[0]])
-                   and slots.can_admit([len(context(r)) for r in rids + [queue[0]]])):
-                rids.append(queue.popleft())
-            if not rids and not any(slots.active):
-                raise ValueError(f"request {queue[0]} does not fit in the KV cache even alone")
-        if rids:
-            prompts = [context(r) for r in rids]
-            L = max(len(p) for p in prompts)
-            logits, pre, pad = prefill_padded(model, prompts, max_len=L)
-            nxt = sample_next(logits, **pick)
-            taken = free[:len(rids)]
-            slots.admit(taken, pre, pad)
-            last_tok[torch.tensor(taken, device=device)] = nxt
-            toks = nxt.squeeze(-1).tolist()
-            now = time.perf_counter() - t0
-            for s, rid, t in zip(taken, rids, toks):
-                slot_req[s] = rid
-                outs.setdefault(rid, [])
-                record(s, rid, t, now)
-        for s in slots.reserve_step():                        # paged: out of blocks → preempt newest
-            queue.appendleft(slot_req[s])                     # recompute later from its context
-            slot_req[s] = None
-            stats.preemptions += 1
-        if not any(slots.active):
-            continue
-        live = [s for s in range(n_slots) if slots.active[s]]
-        stats.peak_active = max(stats.peak_active, len(live))
-        stats.decode_steps += 1
-        stats.computed_rows += n_slots
-        stats.useful_rows += len(live)
-        used = slots.used_tokens()
-        stats.kv_used_frac.append(used / slots.reserved_tokens())
-        stats.kv_alloc_frac.append(used / max(1, slots.allocated_tokens()))
-        if decoder is not None:
-            logits = decoder.step(last_tok)                   # static buffer: sample at once
-        else:
-            with _autocast(device):
-                logits, _ = model(last_tok, cache=slots)      # one token per slot
-        last_tok = sample_next(logits[:, -1], **pick)
-        toks = last_tok.squeeze(-1).tolist()
-        now = time.perf_counter() - t0
-        for s in live:
-            record(s, slot_req[s], toks[s], now)
-    stats.kv_allocated_at_end = slots.allocated_tokens()
-    stats.wall_s = time.perf_counter() - t0
-    stats.useful_tokens = sum(len(r.tokens) for r in results)
-    return results, stats.summary(results)
+    rids = [eng.add_request(r) for r in requests]
+    while eng.has_work():
+        eng.step()
+    st = eng.stats
+    st.kv_allocated_at_end = eng.slots.allocated_tokens()
+    st.wall_s = time.perf_counter() - t0
+    results = [eng.results.pop(r) for r in rids]
+    return results, st.summary(results)

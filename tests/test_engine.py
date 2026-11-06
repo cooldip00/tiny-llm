@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from tinyllm.config import ModelConfig
-from tinyllm.engine import Request, prefill_padded, run_continuous, run_static
+from tinyllm.engine import ContinuousEngine, Request, prefill_padded, run_continuous, run_static
 from tinyllm.generate import generate
 from tinyllm.kv_cache import KVCache, SlotKVCache
 from tinyllm.model import Transformer
@@ -146,3 +146,77 @@ def test_slot_cache_rejects_multi_token_step(model):
         cache = KVCache(CFG.n_layers, 16)
         model(torch.zeros(1, 9, dtype=torch.long), cache=cache)
         slots.admit([0], cache, [0])
+
+
+# -- 4.13: ContinuousEngine, requests arriving while others decode -------------------------
+
+def drive(eng, reqs, arrive_at):
+    """Add reqs[j] before step arrive_at[j]; step until idle. Returns (rids, events per rid)."""
+    rids, events, step = [None] * len(reqs), {}, 0
+    while step <= max(arrive_at) or eng.has_work():
+        for j, a in enumerate(arrive_at):
+            if a == step:
+                rids[j] = eng.add_request(reqs[j])
+        for e in eng.step():
+            events.setdefault(e.rid, []).append(e)
+        step += 1
+    return rids, events
+
+
+@pytest.mark.parametrize("kv", ["slots", "paged"])
+@pytest.mark.parametrize("eos_id", [None, 5])
+def test_engine_late_arrivals_match_solo(model, kv, eos_id):
+    reqs = make_requests(n=9, seed=4, eos_id=eos_id)
+    arrive_at = [0, 0, 1, 3, 3, 4, 9, 10, 20]                  # some join mid-decode, some when idle
+    eng = ContinuousEngine(model, n_slots=3, kv=kv, block_size=4, kv_blocks=24)
+    rids, events = drive(eng, reqs, arrive_at)
+    for j, r in enumerate(reqs):
+        res = eng.results.pop(rids[j])
+        assert res.tokens == solo(model, r)
+        ev = events[rids[j]]
+        assert [e.token for e in ev] == res.tokens                # the stream is the result
+        assert [e.done for e in ev] == [False] * (len(ev) - 1) + [True]
+        assert 0 <= res.ttft_s <= res.latency_s
+    assert eng.results == {} and not eng.has_work()
+    assert eng.slots.allocated_tokens() == 0
+
+
+def test_engine_abort_frees_the_slot(model):
+    reqs = make_requests(n=4, seed=5)
+    reqs[0] = Request(reqs[0].prompt, 15)                         # still running after 2 steps
+    eng = ContinuousEngine(model, n_slots=2)
+    rids = [eng.add_request(r) for r in reqs]                     # 2 run, 2 queue
+    eng.step(), eng.step()
+    assert eng.abort(rids[0]) and eng.abort(rids[3])              # one running, one queued
+    assert not eng.abort(rids[0]) and not eng.abort(99)
+    while eng.has_work():
+        eng.step()
+    assert sorted(eng.results) == [rids[1], rids[2]]
+    for j in (1, 2):
+        assert eng.results[rids[j]].tokens == solo(model, reqs[j])
+    assert eng.slots.allocated_tokens() == 0 and not any(eng.slots.active)
+
+
+def test_engine_rejects_bad_requests_on_add(model):
+    eng = ContinuousEngine(model, n_slots=1)
+    with pytest.raises(ValueError, match="slot max_len"):
+        eng.add_request(Request([1] * 40, 10))
+    with pytest.raises(ValueError, match="non-empty"):
+        eng.add_request(Request([], 3))
+    with pytest.raises(ValueError, match="non-empty"):
+        eng.add_request(Request([1, 2], 0))
+    assert not eng.has_work()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a GPU")
+def test_engine_late_arrivals_graph_equals_eager(model):
+    import copy
+    m = copy.deepcopy(model).cuda()
+    reqs = make_requests(n=9, seed=6, eos_id=7)
+    arrive_at = [0, 1, 1, 2, 5, 5, 6, 12, 13]
+    out = {}
+    for graph in (False, True):
+        eng = ContinuousEngine(m, n_slots=3, cuda_graph=graph, buckets=(16, 32, 48))
+        rids, _ = drive(eng, reqs, arrive_at)
+        out[graph] = [eng.results[r].tokens for r in rids]
+    assert out[True] == out[False]

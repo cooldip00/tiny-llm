@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
 - **Step:** 4.11b CUDA graphs in the continuous engine, starting 2026-11-06 (D-027, ~1 day), then 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-027: 4.11b → 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
-- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`.
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`. _Pushed; 4.13 step 1 done 2026-11-06._ **Next action:** 4.13 step 2, the FastAPI server with `POST /v1/completions` (adds fastapi + uvicorn, D-025).
 - _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -19,6 +19,13 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-06 — 4.13 step 1: `ContinuousEngine`
+- `engine.py`: `run_continuous`'s loop is now `ContinuousEngine` with `add_request()` (any time; returns an id; rejects requests that can never fit), `step()` (admit + one decode step; returns the new tokens as `Event(rid, token, done)`), `abort()` (frees the slot or drops the queued request) and `results` (popped by the caller). `run_continuous` is a thin wrapper, so every 4.4 / 4.5 / 4.11b test checks the refactor unchanged.
+- TTFT and latency now count from each request's arrival. With all requests added at t=0 they equal the old numbers.
+- Sampling settings stay per engine. Per-request sampling is not needed for the greedy done-when; decide in step 2 if the server needs it.
+- New tests: late arrivals (slots and paged, with and without EOS) equal solo `generate()`, the event stream equals the result, abort of a running and a queued request, rejection when added, graphs equal eager under staggered arrivals (CUDA). Full suite **239 passed**.
+- Next: step 2, the server.
 
 ### 2026-11-06 — 4.11b CUDA graphs in the continuous engine
 - `SlotGraphDecoder` (`cuda_graph.py`): one graph per attention-window bucket (128, 256, … max_len) in a shared pool. `SlotKVCache` gets a fixed `window` (the bucket) and `advance_host()`, the host half of `end_step` (a replay runs only the device half). Prefill and sampling stay eager.
