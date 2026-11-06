@@ -422,6 +422,24 @@ Decode tok/s (% of ceiling):
   - HF `generate` vs our KV: 2/8 greedy rows identical. Teacher-forced argmax agreement 99.41%, 6 flips, all at our margin ≤ 0.125 (1 bf16 ulp at that scale; median 1.6). 4.9c was bit-identical because both models ran plain bf16 there; here ours runs under autocast.
 - Not done: the vLLM / llama.cpp rows (4.8a), CUDA graphs for the serving engines (PARKING_LOT), and the fused INT8 kernel (4.10b).
 
+### 4.11b CUDA graphs in the continuous engine (2026-11-06)
+- **What:** `SlotGraphDecoder` in `src/tinyllm/cuda_graph.py`, enabled with `run_continuous(..., cuda_graph=True)`. You can also pass a decoder to reuse its graphs. Slot cache only; paged KV is not done.
+  - The slot step already had fixed shapes except one: the attention window ran to the longest slot (`max(lens) + 1`). `SlotKVCache.window` now fixes it to a bucket (128, 256, … `max_seq_len`), so the step stays the same while slots join and leave.
+  - One graph per bucket, all in a shared memory pool, as in 4.11. Admit / release update the device-side lengths and slot state in place, so replays see them without a recapture.
+  - A replay runs only the device half of `end_step`, so the decoder then calls `advance_host()` to advance the CPU-side lengths. Prefill and sampling stay eager.
+- **Correctness:** **graphs equal eager exactly**, unlike 4.11's `generate()`. The eager slot step already attends with a mask, so both paths use the same SDPA kernel. Tested teacher-forced (tiny model and TinyLlama, 0 flips in 240 TinyLlama slot-steps) and end to end through `run_continuous` (1 / 3 / 8 slots, with and without EOS, joins / leaves and bucket switches mid-run).
+- **Speed** (`bench_serving --model tinyllama --cuda-graph`, same 64 requests as above, 9,004 tokens, median of 3, NitroSense Performance mode):
+
+  | Slots | static tok/s | continuous (eager) | continuous + graphs | graphs vs eager | latency mean / p95 (s), graphs | capture |
+  |---|---|---|---|---|---|---|
+  | 8 | 181 | 245 | **581** | 2.37× | 7.4 / 13.5 | 0.27 s |
+  | 32 | 631 | 679 | **956** | 1.41× | 4.8 / 8.2 | 0.25 s |
+
+  - The gain is largest at 8 slots, where eager is the most host-bound. With graphs, GPU utilisation goes from 44–65% to 93–97%.
+  - The graph rows throttled on heat (84 °C, SM 1575–1725 MHz vs 1785–1875 for eager), so the speedup is measured at a lower clock.
+  - The eager rows here are ~9% below the table above (245 vs 272 at 8 slots, measured 2026-11-04). Eager is host-bound, so CPU speed and load move it. Compare within one run.
+  - Same tokens as eager at both sizes: 22/64 and 32/64 requests identical to solo `generate()`, with the same first divergences.
+
 ## Results: Triton kernels (fill in)
 | Kernel | Shape | PyTorch time | Triton time | Achieved GB/s | % of peak | End-to-end tok/s Δ |
 |---|---|---|---|---|---|---|

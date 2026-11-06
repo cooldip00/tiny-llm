@@ -200,7 +200,5 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; rest of Phase 6 → **v1** |
 | If ahead | 4.7 prompt-lookup decoding, 4.10 Triton |
 | After v1 | Phase 5, Phase 7 |
-| If ahead | 4.7, 4.10 |
-| After v1 | Phase 5, Phase 7 |
 
 Every day: ~30 min explaining that day's work out loud (feeds 6.6).

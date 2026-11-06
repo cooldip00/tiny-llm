@@ -38,6 +38,7 @@ Full tables, by batch size and prompt length, with the method and caveats: [docs
 |---|---|---|---|
 | Static batching (TinyLlama) | 8 slots | 198 | — |
 | Continuous batching (TinyLlama) | 8 slots | 272 | 1.37× |
+| Continuous batching + CUDA graphs (TinyLlama) | 8 slots | 581 | 2.37× vs eager continuous in the same run (245) |
 | Contiguous KV slots (30M model) | 64 MiB of KV, 8 sequences | 633 | — |
 | Paged KV cache (30M model) | same 64 MiB, 25 sequences | 924 | 1.46× |
 
@@ -130,7 +131,7 @@ CI runs the CPU test suite on every push. GPU benchmark numbers come from the la
 
 - Compare with vLLM and llama.cpp on the same GPU
 - Fused INT8 dequantize + matrix-vector kernel in Triton
-- CUDA graphs for the continuous and paged engines
+- CUDA graphs for the paged engine (the continuous engine has them)
 - One command that regenerates every results table
 - Attention ablation (MHA vs GQA vs MLA vs a Gated DeltaNet hybrid) at a fixed compute budget ([docs/RESEARCH.md](docs/RESEARCH.md))
 
