@@ -203,3 +203,158 @@ def test_tinyllama_graph_greedy_matches_eager_up_to_near_ties(tinyllama):
               f"{diff[0].item() - n if len(diff) else None}")
         if len(diff):
             assert diff[0].item() - n in flips.tolist()
+
+
+# --- 4.11b: the continuous engine's slot decode as CUDA graphs ------------------------------------
+
+from tinyllm.cuda_graph import SlotGraphDecoder              # noqa: E402
+from tinyllm.engine import Request, run_continuous           # noqa: E402
+from tinyllm.kv_cache import SlotKVCache                     # noqa: E402
+
+
+@torch.no_grad()
+def slot_logits(model, seqs, plan, n_slots, mode, buckets=BUCKETS, max_len=None):
+    """Teacher-forced slot decode. plan[j] = (slot, n_prompt, join_step, leave_step): seqs[j]
+    is prefilled with its first n_prompt tokens into `slot` at join_step, fed its own next
+    token every step, and released at leave_step. mode: "eager" (the engine's model call),
+    "static" (SlotGraphDecoder, use_graph=False) or "graph". Returns {(step, j): logits}."""
+    max_len = max_len or model.cfg.max_seq_len
+    cfg = model.cfg
+    slots = SlotKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, max_len,
+                        torch.bfloat16, "cuda")
+    dec = None if mode == "eager" else SlotGraphDecoder(model, slots, buckets, use_graph=mode == "graph")
+    pos: dict[int, int] = {}                                   # seq j → next index to feed
+    owner: dict[int, int] = {}                                 # slot → seq j
+    tok = torch.zeros(n_slots, 1, dtype=torch.long, device="cuda")
+    out = {}
+    for step in range(max(p[3] for p in plan)):
+        for j, (s, n, join, leave) in enumerate(plan):
+            if step == leave and j in pos:
+                slots.release(s)
+                del pos[j], owner[s]
+            if step == join:
+                assert s not in owner, "plan puts two sequences in one slot"
+                _, pre, pad = prefill_padded(model, [seqs[j][:n]], max_len=n)
+                slots.admit([s], pre, pad)
+                pos[j], owner[s] = n, j
+        if not owner:
+            continue
+        tok.zero_()
+        for s, j in owner.items():
+            tok[s, 0] = seqs[j][pos[j]]
+        if dec is None:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                logits = model(tok, cache=slots)[0]
+        else:
+            logits = dec.step(tok)
+        for s, j in owner.items():
+            out[(step, j)] = logits[s, -1].float().clone()     # copy out of the static buffer
+            pos[j] += 1
+    assert slots._lens_dev.tolist() == slots.lens              # host and device lengths agree
+    return out, dec
+
+
+# slot, n_prompt, join, leave. Slot 0 runs to 80 keys (every bucket); seq 1 leaves early and
+# seq 2 reuses its slot; slot 2 stays free throughout (it still computes a row).
+PLAN = [(0, 10, 0, 70), (1, 5, 3, 20), (1, 20, 25, 60)]
+
+
+def test_slot_replay_is_bit_identical_to_windowed_eager_step(model):
+    g = torch.Generator().manual_seed(5)
+    seqs = [torch.randint(0, CFG.vocab_size, (CFG.max_seq_len,), generator=g).tolist() for _ in PLAN]
+    got, dec = slot_logits(model, seqs, PLAN, 3, "graph")
+    ref, _ = slot_logits(model, seqs, PLAN, 3, "static")
+    assert got.keys() == ref.keys()
+    assert all(torch.equal(got[k], ref[k]) for k in ref)
+    assert sorted(dec.graphs) == [16, 32, 64, 96]              # windows switched mid-run
+
+
+def test_slot_graph_close_to_eager_slot_decode(model):
+    """Against the engine's eager step (window = longest slot + 1, another SDPA shape): bf16-close,
+    and the tiny model's well-separated logits give the same top-1 everywhere."""
+    g = torch.Generator().manual_seed(6)
+    seqs = [torch.randint(0, CFG.vocab_size, (CFG.max_seq_len,), generator=g).tolist() for _ in PLAN]
+    got, _ = slot_logits(model, seqs, PLAN, 3, "graph")
+    ref, _ = slot_logits(model, seqs, PLAN, 3, "eager")
+    a, b = torch.stack([got[k] for k in ref]), torch.stack([ref[k] for k in ref])
+    err, scale = bf16_gap(b, a)
+    assert err <= 0.02 * scale
+    assert torch.equal(a.argmax(-1), b.argmax(-1))
+
+
+def graph_requests(n=12, seed=3, eos_id=None):
+    """Prompts 2-30 tokens, 1-50 new: long enough that runs cross the 16/32/64 buckets."""
+    g = torch.Generator().manual_seed(seed)
+    reqs = []
+    for _ in range(n):
+        t = int(torch.randint(2, 31, (1,), generator=g))
+        new = int(torch.randint(1, 51, (1,), generator=g))
+        reqs.append(Request(torch.randint(0, CFG.vocab_size, (t,), generator=g).tolist(), new, eos_id))
+    return reqs
+
+
+@pytest.mark.parametrize("n_slots", [1, 3, 8])
+@pytest.mark.parametrize("eos_id", [None, 7])
+def test_run_continuous_cuda_graph_matches_eager(model, n_slots, eos_id):
+    reqs = graph_requests(eos_id=eos_id)
+    want, ws = run_continuous(model, reqs, n_slots)
+    got, gs = run_continuous(model, reqs, n_slots, cuda_graph=True, buckets=BUCKETS)
+    assert [r.tokens for r in got] == [r.tokens for r in want]
+    assert gs["useful_tokens"] == ws["useful_tokens"]
+
+
+def test_reused_decoder_keeps_graphs_and_results(model):
+    """A SlotGraphDecoder passed in is reused across calls: graphs captured up front by capture()
+    serve every run (no recapture), and results equal eager each time."""
+    cfg = model.cfg
+    dec = SlotGraphDecoder(model, SlotKVCache(cfg.n_layers, 3, cfg.n_kv_heads, cfg.head_dim,
+                                              cfg.max_seq_len, torch.bfloat16, "cuda"), BUCKETS)
+    assert dec.capture() > 0
+    graphs = dict(dec.graphs)
+    assert sorted(graphs) == list(BUCKETS)
+    for seed in (3, 4):
+        reqs = graph_requests(seed=seed)
+        got, _ = run_continuous(model, reqs, 3, cuda_graph=dec)
+        want, _ = run_continuous(model, reqs, 3)
+        assert [r.tokens for r in got] == [r.tokens for r in want]
+        assert not any(dec.slots.active)                       # every slot released at the end
+    assert all(dec.graphs[w] is graphs[w] for w in BUCKETS)    # nothing recaptured
+    with pytest.raises(ValueError, match="idle slots"):
+        run_continuous(model, graph_requests(n=2), 4, cuda_graph=dec)   # slot count mismatch
+
+
+def test_cuda_graph_needs_slots_and_cuda(model):
+    reqs = graph_requests(n=2)
+    with pytest.raises(ValueError, match="slots"):
+        run_continuous(model, reqs, 2, kv="paged", cuda_graph=True)
+    cfg = model.cfg
+    cpu_slots = SlotKVCache(cfg.n_layers, 2, cfg.n_kv_heads, cfg.head_dim, 16, torch.float32, "cpu")
+    with torch.random.fork_rng():                              # leave the global RNG to later tests
+        cpu_model = Transformer(CFG)
+    with pytest.raises(ValueError, match="CUDA"):
+        SlotGraphDecoder(cpu_model, cpu_slots)
+
+
+def test_tinyllama_slot_graph_matches_eager_up_to_near_ties(tinyllama):
+    """Real text through the slot engine at 1.1B: replay == windowed eager exactly; vs the eager
+    slot step, the logit gap is bf16-sized and every top-1 flip is a near-tie (as in 4.11)."""
+    model, tok = tinyllama
+    seqs, plan = [], []
+    for j, q in enumerate(["What is a KV cache?", "Write a haiku about the sea.",
+                           "Name three prime numbers."]):
+        ids = torch.tensor([tok.encode(tok.chat_prompt(q))], device="cuda")
+        seqs.append(generate(model, ids, 80, temperature=0)[0].tolist())
+        plan.append((j, ids.shape[1], 4 * j, 4 * j + 80))       # staggered joins, run past 64 keys
+    buckets = (64, 128, 256, 512)
+    got, dec = slot_logits(model, seqs, plan, 3, "graph", buckets, max_len=512)
+    static, _ = slot_logits(model, seqs, plan, 3, "static", buckets, max_len=512)
+    ref, _ = slot_logits(model, seqs, plan, 3, "eager", buckets, max_len=512)
+    assert all(torch.equal(got[k], static[k]) for k in static)
+    assert sorted(dec.graphs) == [64, 128]
+    a, b = torch.stack([got[k] for k in ref]), torch.stack([ref[k] for k in ref])
+    err, scale = bf16_gap(b, a)
+    assert err <= 0.02 * scale
+    top2 = b.topk(2, -1).values
+    flips = (a.argmax(-1) != b.argmax(-1)).nonzero().flatten()
+    print(f"{len(flips)} top-1 flips in {len(ref)} slot-steps")
+    assert ((top2[flips, 0] - top2[flips, 1]) <= 0.25).all()     # <= 2 bf16 ulps

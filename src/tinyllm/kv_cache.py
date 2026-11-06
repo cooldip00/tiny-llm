@@ -140,6 +140,9 @@ class SlotKVCache:
         self._rows = torch.arange(n_slots, device=device)
         self.attn_kwargs: dict = {}
         self._end = 0
+        # 4.11b: a fixed attention window (a graph bucket) instead of "as far as the longest
+        # slot", so the step's shapes don't change between steps. None = eager default.
+        self.window: int | None = None
 
     # -- scheduling --------------------------------------------------------
     def free_slots(self) -> list[int]:
@@ -194,17 +197,25 @@ class SlotKVCache:
             raise ValueError("SlotKVCache decodes one token per slot; prefill goes through KVCache")
         if max(self.lens) >= self.max_len:
             raise ValueError(f"a slot is full (max_len {self.max_len})")
-        self._end = max(self.lens) + 1                       # attend only as far as the longest slot
+        need = max(self.lens) + 1                            # attend only as far as the longest slot
+        if self.window is not None and self.window < need:
+            raise ValueError(f"window {self.window} < {need} keys")
+        self._end = self.window or need
         k_pos = torch.arange(self._end, device=self._lens_dev.device)
         valid = (k_pos >= self._first_dev[:, None]) & (k_pos <= self._lens_dev[:, None])
         self.attn_kwargs = {"attn_mask": valid[:, None, None, :]}   # (S, 1, 1, end)
         return rope.at(self._lens_dev[:, None])
 
     def end_step(self, T: int) -> None:
+        self.advance_host()
+        self._lens_dev += self._active_dev                   # same update on the device, no copy
+
+    def advance_host(self) -> None:
+        """The host half of end_step. A CUDA-graph replay runs only the device half, so the
+        graph decoder calls this after each replay."""
         for s in range(self.n_slots):
             if self.active[s]:
                 self.lens[s] += 1
-        self._lens_dev += self._active_dev                   # same update on the device, no copy
 
     def layer(self, i: int) -> "SlotLayerKV":
         return SlotLayerKV(self, i)

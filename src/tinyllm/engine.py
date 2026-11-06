@@ -165,18 +165,31 @@ def run_static(model: Transformer, requests: list[Request], batch_size: int,
 def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
                    max_len: int | None = None, temperature: float = 0.0, top_k=None,
                    top_p=None, generator=None, kv: str = "slots", block_size: int = 16,
-                   kv_blocks: int | None = None) -> tuple[list[Result], dict]:
+                   kv_blocks: int | None = None, cuda_graph=False,
+                   buckets: tuple[int, ...] | None = None) -> tuple[list[Result], dict]:
     """kv="slots": SlotKVCache, every slot reserves max_len positions (4.4).
     kv="paged": PagedKVCache with kv_blocks blocks of block_size tokens (4.5). Default
     kv_blocks = the same memory as the slot cache. Sequences beyond what the blocks hold are
-    preempted and recomputed later."""
+    preempted and recomputed later.
+    cuda_graph (4.11b, CUDA, kv="slots" only): the decode step is replayed as a CUDA graph per
+    attention-window bucket (cuda_graph.SlotGraphDecoder); prefill stays eager. True builds a
+    decoder for this call; pass a SlotGraphDecoder to reuse its cache and captured graphs
+    across calls (benchmarks, a server)."""
     model.eval()
     cfg = model.cfg
     device = next(model.parameters()).device
     max_len = max_len or cfg.max_seq_len
     pick = dict(temperature=temperature, top_k=top_k, top_p=top_p, generator=generator)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    if kv == "slots":
+    if cuda_graph is not False and kv != "slots":
+        raise ValueError("cuda_graph supports kv='slots' only (paged: not yet)")
+    decoder = None
+    if cuda_graph is not False and not isinstance(cuda_graph, bool):   # a SlotGraphDecoder
+        decoder, slots = cuda_graph, cuda_graph.slots
+        if slots.n_slots != n_slots or slots.max_len != max_len or any(slots.active):
+            raise ValueError(f"decoder cache has {slots.n_slots} slots of {slots.max_len} "
+                             f"(active: {sum(slots.active)}); need {n_slots} idle slots of {max_len}")
+    elif kv == "slots":
         slots = SlotKVCache(cfg.n_layers, n_slots, cfg.n_kv_heads, cfg.head_dim, max_len, dtype, device)
     elif kv == "paged":
         from tinyllm.paged_kv import PagedKVCache
@@ -185,6 +198,9 @@ def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
                              block_size, max_len, dtype, device)
     else:
         raise ValueError(f"kv must be 'slots' or 'paged', got {kv!r}")
+    if cuda_graph is True:
+        from tinyllm.cuda_graph import SlotGraphDecoder
+        decoder = SlotGraphDecoder(model, slots, buckets=buckets)
     stats = Stats(kv_bytes_per_token=_kv_bytes_per_token(model, device),
                   kv_reserved_tokens=slots.reserved_tokens())
     results: list[Result | None] = [None] * len(requests)
@@ -258,8 +274,11 @@ def run_continuous(model: Transformer, requests: list[Request], n_slots: int,
         used = slots.used_tokens()
         stats.kv_used_frac.append(used / slots.reserved_tokens())
         stats.kv_alloc_frac.append(used / max(1, slots.allocated_tokens()))
-        with _autocast(device):
-            logits, _ = model(last_tok, cache=slots)          # one token per slot
+        if decoder is not None:
+            logits = decoder.step(last_tok)                   # static buffer: sample at once
+        else:
+            with _autocast(device):
+                logits, _ = model(last_tok, cache=slots)      # one token per slot
         last_tok = sample_next(logits[:, -1], **pick)
         toks = last_tok.squeeze(-1).tolist()
         now = time.perf_counter() - t0

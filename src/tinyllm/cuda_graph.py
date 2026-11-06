@@ -21,6 +21,8 @@ kernel for that. Graph replay *is* bit-identical to the same static step run eag
 Autocast runs with cache_enabled=False: its weight-cast cache doesn't survive capture.
 """
 
+import time
+
 import torch
 from torch import Tensor
 
@@ -203,3 +205,100 @@ class GraphDecoder:
             graph.replay()
         c.n += 1
         return out
+
+
+class SlotGraphDecoder:
+    """The continuous engine's decode step (one token per SlotKVCache slot) as CUDA graphs
+    (4.11b). Admission, release and prefill stay eager in the engine.
+
+    Why it can be a graph: the batch is always n_slots rows (free slots compute too), and
+    slot lengths / pad starts / active flags live in fixed device tensors that admit() and
+    release() update in place. The one changing shape is the attention window, so the cache
+    gets a fixed window from the length buckets, with keys past each slot's length masked.
+
+    Each step writes the token into a static buffer and replays the graph for the smallest
+    bucket that holds the longest slot + 1. The replay advances the device lengths; the host
+    lengths move in advance_host(). use_graph=False runs the identical windowed step eagerly,
+    the reference that replay must match bit for bit.
+    """
+
+    def __init__(self, model: Transformer, slots, buckets: tuple[int, ...] | None = None,
+                 use_graph: bool = True):
+        device = next(model.parameters()).device
+        if device.type != "cuda":
+            raise ValueError("CUDA graphs need a CUDA model")
+        if not hasattr(slots, "advance_host"):
+            raise ValueError("SlotGraphDecoder supports the slot cache (kv='slots') only")
+        self.model, self.slots = model, slots
+        self.buckets = tuple(sorted(buckets)) if buckets else default_buckets(slots.max_len)
+        if self.buckets[-1] < slots.max_len:
+            raise ValueError(f"largest bucket {self.buckets[-1]} < max_len {slots.max_len}")
+        self.tok = torch.zeros(slots.n_slots, 1, dtype=torch.long, device=device)
+        self.use_graph = use_graph
+        self.graphs: dict[int, tuple[torch.cuda.CUDAGraph, Tensor]] = {}
+        self.pool = torch.cuda.graph_pool_handle()
+
+    def _forward(self) -> Tensor:
+        with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
+            logits, _ = self.model(self.tok, cache=self.slots)
+        return logits
+
+    def _capture(self) -> tuple[torch.cuda.CUDAGraph, Tensor]:
+        # The warm-up runs the real step (its K/V writes are the ones replay will make) and
+        # advances the lengths; capture runs the host half again. Put both back each time.
+        c = self.slots
+        lens, lens_dev = list(c.lens), c._lens_dev.clone()
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            self._forward()
+        torch.cuda.current_stream().wait_stream(side)
+        c.lens[:] = lens
+        c._lens_dev.copy_(lens_dev)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self.pool):
+            out = self._forward()
+        c.lens[:] = lens
+        return graph, out
+
+    def bucket(self, n_keys: int) -> int:
+        return next(b for b in self.buckets if b >= n_keys)
+
+    @torch.no_grad()
+    def capture(self, windows: tuple[int, ...] | None = None) -> float:
+        """Capture graphs ahead of time (default: every bucket), so no timed step pays for it.
+        Safe between steps: the warm-up's K/V writes land at each slot's next position, which
+        the next real step overwrites. Returns the seconds it took."""
+        t0 = time.perf_counter()
+        c = self.slots
+        try:
+            for w in windows or self.buckets:
+                if w not in self.graphs:
+                    c.window = w
+                    self.graphs[w] = self._capture()
+        finally:
+            c.window = None
+        torch.cuda.synchronize()
+        return time.perf_counter() - t0
+
+    @torch.no_grad()
+    def step(self, tok: Tensor) -> Tensor:
+        """tok (n_slots, 1) → logits (n_slots, 1, V). With graphs, the result is a static
+        buffer that the next step overwrites: sample from it first."""
+        c = self.slots
+        need = max(c.lens) + 1
+        if need > c.max_len:
+            raise ValueError(f"a slot is full (max_len {c.max_len})")
+        c.window = self.bucket(need)
+        self.tok.copy_(tok)
+        try:
+            if not self.use_graph:
+                return self._forward()
+            if c.window not in self.graphs:
+                self.graphs[c.window] = self._capture()
+            graph, out = self.graphs[c.window]
+            graph.replay()
+            c.advance_host()
+            return out
+        finally:
+            c.window = None

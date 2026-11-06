@@ -3,7 +3,7 @@
 ## Current
 - **Phase:** 4 — Inference engine (Phase 3 complete)
 - **Step:** 4.11b CUDA graphs in the continuous engine, starting 2026-11-06 (D-027, ~1 day), then 4.13 OpenAI-compatible HTTP server + load generator (toward **v1**, ~2026-11-18). Order per D-027: 4.11b → 4.13 → 4.8a → 4.8b → 6.8. **v1-preview reached 2026-11-05**, 6 days early: repo public with the README, CI badge passing.
-- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b).
+- **Next action:** the vLLM + llama.cpp install spike, which was planned for the 4.9 days but not done (PLAN 4.8a). It's one hour, in separate environments outside the repo, to surface install problems early. Then 4.13. _Spike done 2026-11-05: both engines run TinyLlama and serve `/v1/completions`; project env unchanged (see the log). Next: 4.13._ **Next action (2026-11-06):** 4.11b step 1, `SlotGraphDecoder` in `cuda_graph.py` (PLAN 4.11b). _4.11b done 2026-11-06 (see the log)._ **Next action:** push the local commits (one CI run), then 4.13 step 1, the engine object with `add_request()` / `step()`.
 - _Previous: 6.7 CI, first README, repo public (6.5a, without plots yet): done 2026-11-05, see the log._
 - **Later (4.6):** per-channel INT8 weights for the Linear layers. Expect little speed gain on the 30M model (overhead-bound); the real test is TinyLlama in 4.9d. _Done 2026-11-04: as expected, quality Δ ≈ 0 and no speed gain here (0.78× at B=1); rerun on TinyLlama in 4.9d._
 - **Blockers:** none
@@ -19,6 +19,24 @@
 
 ## Log
 Newest first. One entry per work block: what was done, numbers, next.
+
+### 2026-11-06 — 4.11b CUDA graphs in the continuous engine
+- `SlotGraphDecoder` (`cuda_graph.py`): one graph per attention-window bucket (128, 256, … max_len) in a shared pool. `SlotKVCache` gets a fixed `window` (the bucket) and `advance_host()`, the host half of `end_step` (a replay runs only the device half). Prefill and sampling stay eager.
+- `run_continuous(cuda_graph=True)` builds a decoder per call; passing a `SlotGraphDecoder` reuses its cache and graphs (the benchmark captures once, outside the timed runs). Paged KV raises "kv='slots' only".
+- Tests: replay is bit-identical to the windowed eager step; the slot graph equals the eager slot step (gap 0); `run_continuous` with graphs equals eager at 1 / 3 / 8 slots, with and without EOS, with joins / leaves and bucket switches mid-run; decoder reuse doesn't recapture; TinyLlama teacher-forced, 0 flips in 240 slot-steps. **Graphs equal eager exactly here**, unlike 4.11's `generate()`: the eager slot step already uses a mask, so both use the same SDPA kernel.
+- Full suite: one run had `test_model.py::test_bf16_autocast_cuda` fail (an unseeded model, checked within 0.1 of log V; passes alone). The new CPU-model test now builds its model inside `torch.random.fork_rng()` so it leaves the global RNG unchanged. Rerun: **232 passed** (157 s).
+- `bench_serving.py --model tinyllama --cuda-graph` (64 requests, 9,004 tokens, median of 3, NitroSense **Performance** mode):
+
+  | Slots | static | continuous (eager) | cont + graph | graph vs eager | latency mean / p95 (s), graph | capture |
+  |---|---|---|---|---|---|---|
+  | 8 | 181 | 245 | **581** | 2.37× | 7.4 / 13.5 | 0.27 s |
+  | 32 | 631 | 679 | **956** | 1.41× | 4.8 / 8.2 | 0.25 s |
+
+  - Same tokens as eager at both sizes: identical divergence from solo `generate()` (22/64 and 32/64 identical).
+  - The graph rows run the GPU at 93–97% utilisation (eager: 44–65%), hot enough to throttle (`sw_thermal_slowdown`, 84 °C, SM 1575–1725 vs 1785–1875 MHz for eager). The gain is measured at a lower clock.
+  - The eager rows are ~9% below the 2026-11-04 run (245 vs 272, 181 vs 198 at 8 slots). Eager is host-bound, so CPU speed and load move it.
+  - A first run was discarded because the laptop switched from Default to Performance mode mid-run (memory clock 7001 → 7201 MHz). In Default mode, eager at 8 slots gave 209 tok/s. Benchmarks before 2026-11-06 ran in Performance mode; from now on each entry names the mode.
+- Next: push the local commits, then 4.13.
 
 ### 2026-11-05 — Planned 4.11b and 4.13 (D-027)
 - 4.13 plan made: an engine object with `add_request()` / `step()`, a FastAPI server with `/v1/completions` (streaming, `ignore_eos`), a Poisson load generator (httpx), and CPU tests. Estimate ~7–9 h.

@@ -16,6 +16,10 @@ report gives identical requests and the first divergence instead of asserting eq
 
 Step 4.9d: --model tinyllama runs the same workload shape on TinyLlama (bf16), with the prompts
 cut from the validation text re-tokenized by its tokenizer (bench_generate.tinyllama_val_tokens).
+
+Step 4.11b: --cuda-graph adds "cont+graph" rows: continuous batching with the decode step
+replayed as CUDA graphs. One decoder per slot count, every bucket captured before the timed
+runs (capture_s is reported apart, not in wall time) and freed after its row.
 """
 
 import argparse
@@ -29,8 +33,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 from bench_generate import use_model, val_tokens  # noqa: E402
 
+from tinyllm.cuda_graph import SlotGraphDecoder
 from tinyllm.engine import Request, run_continuous, run_static
 from tinyllm.generate import generate
+from tinyllm.kv_cache import SlotKVCache
 from tinyllm.provenance import GpuMonitor, Provenance
 
 
@@ -71,6 +77,8 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=3, help="runs per config; the median-wall run is reported")
     ap.add_argument("--paged", action="store_true",
                     help="4.5: add paged-KV rows with the 8-slot cache's memory budget")
+    ap.add_argument("--cuda-graph", action="store_true",
+                    help="4.11b: add continuous rows with the decode step as CUDA graphs")
     ap.add_argument("--model", default=None, help="'tinyllama' instead of --ckpt (4.9d)")
     ap.add_argument("--out", type=Path, default=None,
                     help="default: runs/bench/serving.json, runs/bench/tinyllama/serving.json")
@@ -98,6 +106,8 @@ def main() -> None:
     runs = []                                                 # (label, size, fn, kwargs)
     for size in (int(s) for s in args.sizes.split(",")):
         runs += [("static", size, run_static, {}), ("continuous", size, run_continuous, {})]
+        if args.cuda_graph:
+            runs.append(("cont+graph", size, run_continuous, {"cuda_graph": "build"}))
     if args.paged:
         # Budget = the 8-slot cache's memory: 8 × 512 positions = 4096 tokens (64 MiB in bf16).
         budget = 8 * model.cfg.max_seq_len
@@ -110,14 +120,25 @@ def main() -> None:
     for name, size, fn, kw in runs:
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
+        capture_s = None
+        if kw.get("cuda_graph") == "build":                   # one decoder per row, freed after it
+            cfg = model.cfg
+            dec = SlotGraphDecoder(model, SlotKVCache(cfg.n_layers, size, cfg.n_kv_heads, cfg.head_dim,
+                                                      cfg.max_seq_len, torch.bfloat16, device))
+            capture_s = dec.capture()
+            run_continuous(model, warm, size, cuda_graph=dec)  # warm the eager prefill shapes too
+            kw = {"cuda_graph": dec}
         mon = GpuMonitor().start()  # per row, so an outlier row can be matched to clocks / throttling
         trials = [fn(model, reqs, size, **kw) for _ in range(args.repeats)]
         gpu_during = mon.stop()
+        kw = dec = None
+        torch.cuda.empty_cache()
         walls = [s["wall_s"] for _, s in trials]
         results, stats = sorted(trials, key=lambda t: t[1]["wall_s"])[len(trials) // 2]  # median run
         stats.update(engine=name, size=size, wall_all_s=walls,
                      peak_vram_mib=torch.cuda.max_memory_allocated() / 2**20,
-                     correctness=agreement([r.tokens for r in results], ref), gpu_during=gpu_during)
+                     correctness=agreement([r.tokens for r in results], ref), gpu_during=gpu_during,
+                     capture_s=capture_s)
         rows.append(stats)
         c = stats["correctness"]
         alloc = stats["kv_alloc_used_mean"]
