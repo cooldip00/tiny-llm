@@ -424,7 +424,7 @@ Decode tok/s (% of ceiling):
   - KV vs naive: 1/8 rows identical. Teacher-forced max |logit diff| 1.53 on a logit scale of 33, argmax agreement 99.17%. That fits 4.9c, where each bf16 path is up to 0.76 off fp32.
   - Graphs vs eager KV: teacher-forced max diff 0.58, argmax 98.97%, 21 flips, all at an eager margin ≤ 0.125 (median 2.0).
   - HF `generate` vs our KV: 2/8 greedy rows identical. Teacher-forced argmax agreement 99.41%, 6 flips, all at our margin ≤ 0.125 (1 bf16 ulp at that scale; median 1.6). 4.9c was bit-identical because both models ran plain bf16 there; here ours runs under autocast.
-- Not done: the vLLM / llama.cpp rows (4.8a), CUDA graphs for the serving engines (PARKING_LOT), and the fused INT8 kernel (4.10b).
+- Not done: the vLLM / llama.cpp rows (4.8a), CUDA graphs for the serving engines (PARKING_LOT), and the fused INT8 kernel (4.10b). _(INT8 kernel done 2026-11-07, see 4.10b below.)_
 
 ### 4.11b CUDA graphs in the continuous engine (2026-11-06)
 - **What:** `SlotGraphDecoder` in `src/tinyllm/cuda_graph.py`, enabled with `run_continuous(..., cuda_graph=True)`. You can also pass a decoder to reuse its graphs. Slot cache only; paged KV is not done.

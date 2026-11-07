@@ -15,7 +15,7 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 - **Training:** a 30M-parameter model on ~1B TinyStories tokens in 2 h 27 min at **56% MFU**.
 - **HTTP server:** OpenAI-compatible, with streaming. Past capacity it rejects requests with a 429, so time to first token stays bounded, where vLLM's and llama.cpp's grow with the queue ([vs vLLM and llama.cpp](#results-vs-vllm-and-llamacpp)).
 
-> Status: **v1-preview**. Still to come: a fused INT8 kernel, CUDA graphs for the paged engine, and an attention ablation (see [Roadmap](#roadmap)).
+> Status: **v1-preview**. Still to come: CUDA graphs for the paged engine and an attention ablation (see [Roadmap](#roadmap)).
 
 ## Results: TinyLlama 1.1B inference
 
@@ -174,7 +174,6 @@ CI runs the CPU test suite on every push. GPU benchmark numbers come from the la
 
 ## Roadmap
 
-- Fused INT8 dequantize + matrix-vector kernel in Triton
 - CUDA graphs for the paged engine (the continuous engine has them)
 - Attention ablation (MHA vs GQA vs MLA vs a Gated DeltaNet hybrid) at a fixed compute budget ([docs/RESEARCH.md](docs/RESEARCH.md))
 
