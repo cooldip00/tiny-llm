@@ -19,17 +19,73 @@ class RMSNorm(nn.Module):
     Like LayerNorm, but with no mean subtraction and no bias: cheaper, and it
     works just as well in LLMs. The statistic is computed in fp32 even under
     bf16, because a sum of squares loses precision in bf16.
+
+    Backend "triton" (step 4.10a) runs tinyllm.kernels.rmsnorm: one kernel instead of about seven,
+    and add_forward fuses the residual add before it. It is used only for CUDA inputs when no
+    gradient is needed (the kernel has no backward); otherwise this PyTorch code runs.
     """
 
-    def __init__(self, dim: int, eps: float = 1e-5):
+    def __init__(self, dim: int, eps: float = 1e-5, backend: str = "torch"):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
+        self.backend = _check_norm_backend(backend)
+
+    def _kernel(self, x: Tensor):
+        if self.backend != "triton" or not x.is_cuda:
+            return None
+        if torch.is_grad_enabled() and (x.requires_grad or self.weight.requires_grad):
+            return None
+        return _norm_kernel()
 
     def forward(self, x: Tensor) -> Tensor:
+        if (k := self._kernel(x)) is not None:
+            return k.rmsnorm(x, self.weight, self.eps)
         xf = x.float()
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
         return xf.to(x.dtype) * self.weight
+
+    def add_forward(self, x: Tensor, a: Tensor) -> tuple[Tensor, Tensor]:
+        """(self(x + a), x + a): the residual add and the norm after it, fused on backend "triton"."""
+        if (k := self._kernel(x)) is not None and not (torch.is_grad_enabled() and a.requires_grad):
+            return k.add_rmsnorm(x, a, self.weight, self.eps)
+        h = x + a
+        return self(h), h
+
+    def extra_repr(self) -> str:
+        return f"{self.weight.shape[0]}, eps={self.eps}, backend={self.backend}"
+
+
+NORM_BACKENDS = ("torch", "triton")
+
+
+def _check_norm_backend(backend: str) -> str:
+    if backend not in NORM_BACKENDS:
+        raise ValueError(f"unknown RMSNorm backend {backend!r}; one of {NORM_BACKENDS}")
+    return backend
+
+
+_NORM_KERNEL: list = []
+
+
+def _norm_kernel():
+    """tinyllm.kernels.rmsnorm, or None without Triton (imported once, on first CUDA use)."""
+    if not _NORM_KERNEL:
+        try:
+            from tinyllm.kernels import rmsnorm
+        except ImportError:
+            rmsnorm = None
+        _NORM_KERNEL.append(rmsnorm)
+    return _NORM_KERNEL[0]
+
+
+def set_norm_backend(model: nn.Module, backend: str) -> int:
+    """Switch every RMSNorm in `model` to `backend` (step 4.10a). Returns how many."""
+    _check_norm_backend(backend)
+    norms = [m for m in model.modules() if isinstance(m, RMSNorm)]
+    for m in norms:
+        m.backend = backend
+    return len(norms)
 
 
 class RotaryEmbedding(nn.Module):
@@ -108,8 +164,9 @@ class Block(nn.Module):
         self.mlp = SwiGLU(cfg)
 
     def forward(self, x: Tensor, rope: tuple[Tensor, Tensor], cache=None) -> Tensor:
-        x = x + self.self_attn(self.input_layernorm(x), rope, cache)
-        return x + self.mlp(self.post_attention_layernorm(x))
+        a = self.self_attn(self.input_layernorm(x), rope, cache)
+        y, x = self.post_attention_layernorm.add_forward(x, a)  # x + a, then its norm (one kernel, 4.10a)
+        return x + self.mlp(y)
 
 
 # Projections that write into the residual stream. Their init is scaled down so the

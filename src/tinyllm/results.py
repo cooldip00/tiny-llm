@@ -64,6 +64,8 @@ BENCHES = [
     Bench("tl-int8-graph", "bench_quant.py", (*TL, "--engine", "kv-graph", "--triton"),
           "tinyllama/int8_graph_triton.json", 12),
     Bench("tl-int8-gemv", "bench_int8_gemv.py", (), "tinyllama/int8_gemv.json", 3),
+    # 4.10a: the Triton RMSNorm + residual add, alone and end to end with CUDA graphs
+    Bench("tl-rmsnorm", "bench_rmsnorm.py", (), "tinyllama/rmsnorm_graph.json", 10),
     Bench("tl-profile", "profile_decode.py", (*TL, "--batch", "1"), "tinyllama/profile/decode_tinyllama_B1.json", 2),
 ]
 BY_NAME = {b.name: b for b in BENCHES}
@@ -267,6 +269,30 @@ def gemv_table(d: dict) -> str:
         "PyTorch int8 casts each weight back to bf16 first, so it moves more bytes than bf16, not fewer.")
 
 
+def rmsnorm_section(d: dict) -> str:
+    batches = sorted({r["batch"] for r in d["rows"]})
+    rows = []
+    for b in batches:
+        t, k = need(d["rows"], "rmsnorm", variant="torch", batch=b), need(d["rows"], "rmsnorm", variant="triton", batch=b)
+        rows.append([str(b), n(t["decode_tok_s"]), n(k["decode_tok_s"]), _ratio(k["decode_tok_s"] / t["decode_tok_s"]),
+                     f"{t['ms_per_step']:.2f} → {k['ms_per_step']:.2f}"])
+    text = table(["Batch", "PyTorch norm tok/s", "Triton norm tok/s", "Triton vs PyTorch", "ms per step"], rows)
+    p, tf, alone = d["profile_b1"], d["teacher_forced"], d["kernels_alone"]
+    fused = sorted((r for r in alone if r["op"] == "add+norm"), key=lambda r: r["rows"])
+    if not fused or fused[0]["rows"] != 1:
+        raise MissingResult("rmsnorm alone: no add+norm row with 1 row")
+    one, big = fused[0], fused[-1]
+    return text + (
+        f"\n\nKV cache + CUDA graphs, the two norms alternating at each batch size. At batch 1 a decode step runs "
+        f"{n(p['torch']['gpu_ops_per_step'])} GPU ops with the PyTorch norm and {n(p['triton']['gpu_ops_per_step'])} "
+        f"with the Triton kernels (GPU busy {p['torch']['gpu_busy_ms_per_step']:.2f} → "
+        f"{p['triton']['gpu_busy_ms_per_step']:.2f} ms per step). Residual add + norm alone: one row takes "
+        f"{one['torch_us']:.1f} µs in PyTorch and {one['triton_us']:.1f} µs in Triton; {n(big['rows'])} rows run at "
+        f"{big['triton_pct_bw']:.0f}% of the measured {d['bandwidth'] / 1e9:.0f} GB/s. Greedy rows identical to the "
+        f"PyTorch norm: {d['greedy_rows_identical']}/{d['n_greedy_rows']}; teacher-forced argmax agreement "
+        f"{tf['argmax_agree']:.2%}.")
+
+
 def serving_baseline(rows: list[dict], r: dict) -> tuple[dict, str] | None:
     """Static has none; continuous vs static at the same size; graphs vs continuous; paged vs 8 contiguous slots."""
     e, s = r["engine"], r["size"]
@@ -416,6 +442,8 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
         int8_section(data["tl-int8-graph"]), "", heat_line(data, ["tl-int8-graph"]),
         "", "#### The matmuls alone", "",
         gemv_table(data["tl-int8-gemv"]), "", heat_line(data, ["tl-int8-gemv"]),
+        "", "### Fused RMSNorm + residual add (Triton, 4.10a)", "",
+        rmsnorm_section(data["tl-rmsnorm"]), "", heat_line(data, ["tl-rmsnorm"]),
         "", "### Serving: static vs continuous batching, with and without CUDA graphs", "",
         serving_table(data["tl-serving"]), "", heat_line(data, ["tl-serving"]),
         "", "### Logits vs HF Transformers", "",

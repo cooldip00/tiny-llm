@@ -74,6 +74,17 @@ def gemv():
             "step_us": {str(m): {v: 10 * us[v] for v in us} for m in (1, 32)}}
 
 
+def rmsnorm():
+    rows = [{"variant": v, "batch": b, "decode_tok_s": 100.0 * b * (1.05 if v == "triton" else 1.0),
+             "ms_per_step": 10.0 / (1.05 if v == "triton" else 1.0)} for b in (1, 8, 32) for v in ("torch", "triton")]
+    alone = [{"op": op, "rows": r, "torch_us": 20.0, "triton_us": 4.0, "triton_pct_bw": 80.0}
+             for op in ("norm", "add+norm") for r in (1, 4096)]
+    prof = {"torch": {"gpu_ops_per_step": 1164.0, "gpu_busy_ms_per_step": 7.78},
+            "triton": {"gpu_ops_per_step": 900.0, "gpu_busy_ms_per_step": 7.5}}
+    return {"bandwidth": 423e9, "provenance": prov(), "rows": rows, "kernels_alone": alone, "profile_b1": prof,
+            "greedy_rows_identical": 7, "n_greedy_rows": 8, "teacher_forced": {"argmax_agree": 0.999}}
+
+
 def logits():
     def phase(pos, flips):
         s = {"max_abs": 0.0, "top1": 1.0, "positions": pos}
@@ -101,6 +112,7 @@ def fake_run(tmp_path: Path) -> Path:
         "tl-hf": gen(4.5), "tl-naive": gen("naive", batches=(1,)), "tl-kv": gen(4.5), "tl-kv-graph": gen(12.8),
         "tl-serving": serving(paged=False), "tl-int8": int8("bf16", ["bf16", "int8"]), "tl-profile": profile(),
         "tl-int8-graph": int8("bf16", ["bf16", "int8", "int8-triton"]), "tl-int8-gemv": gemv(),
+        "tl-rmsnorm": rmsnorm(),
     }
     for name, d in files.items():
         p = tmp_path / R.BY_NAME[name].out
@@ -151,6 +163,9 @@ def test_render_results_from_one_run(tmp_path):
     assert "| 1 | 0.50 | 1.50 | 0.25 | 2.00× | 6.0× |" in page              # matmuls alone, ms per step
     assert "(the 10 Linears)" in page and "read 10 MiB of bf16 weights or 5 MiB" in page
     assert "bf16 runs at 5% of the measured 423 GB/s, the Triton kernel at 5%" in page   # 5 MiB / 250 µs
+    assert "| 8 | 800 | 840 | 1.05× | 10.00 → 9.52 |" in page            # fused RMSNorm, torch vs triton
+    assert "1,164 GPU ops with the PyTorch norm and 900" in page and "4,096 rows run at 80%" in page
+    assert "Greedy rows identical to the PyTorch norm: 7/8" in page
     assert "1,600 MHz (min 1,400), 80 °C, sw_power_cap" in page and "gpu_idle" not in page
     assert "None" not in page and "\n\n\n" not in page and "Throttling warnings" not in page
     assert "token 43 / token 43" in page and " ‡" in page                # 30M naive at P=512 slides its window
@@ -190,7 +205,7 @@ def test_missing_file_names_the_rerun(tmp_path):
     (run / R.BY_NAME["tl-serving"].out).unlink()
     with pytest.raises(R.MissingResult, match=r"tinyllama/serving\.json.*--only tl-serving"):
         R.load_run(run)
-    with pytest.raises(R.MissingResult, match="16 result file"):
+    with pytest.raises(R.MissingResult, match="17 result file"):
         R.load_run(tmp_path / "empty")
 
 
