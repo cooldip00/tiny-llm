@@ -172,7 +172,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
       - A Docker Space, built from the same image as the local server; a one-line `docker run` in the README.
       - A CI job that builds the image, starts it on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion.
       - The status page shows the error budget left for each SLO from 4.13 step 3.
-    - _Steps (2026-11-07):_ 1–2 done (model card, Hub upload `b11100b`, `--hf-model`, CPU image, CI `docker` job; see PROGRESS). 3 demo + status pages _(done 2026-11-07, see PROGRESS)_ → 4 logs dataset + privacy notice + `analyze_logs.py` → 5 deploy the Space + scaling design.
+    - _Steps (2026-11-07):_ 1–2 done (model card, Hub upload `b11100b`, `--hf-model`, CPU image, CI `docker` job; see PROGRESS). 3 demo + status pages _(done 2026-11-07, see PROGRESS)_ → 4 logs dataset + privacy notice + `analyze_logs.py` _(done 2026-11-07, incl. the real HF proof; see PROGRESS)_ → 5 deploy the Space + scaling design.
     - **Step 3 plan (agreed 2026-11-07, ~2–3 h).** If late, cut the charts first; the SLO cards stay.
       1. **Server** (`obs.py`, `server.py`): `GET /stats/history`:
          - **Per minute for the last 60 min**, grouped from the existing 1 h window (no new storage): requests, ok, 5xx, 429, TTFT p50 / p95, total latency p95.
@@ -198,6 +198,25 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
          - Both pages return 200 HTML; polling is not counted.
          - `smoke_server.py` also checks `/`, `/status`, `/stats/history`, so the CI `docker` job covers them.
       6. **Docs:** SERVING.md status-page section, including the since-restart limit (7-day history from the step-4 logs → PARKING_LOT); one README line; PROGRESS; tick here.
+    - **Step 4 plan (agreed 2026-11-07, ~2–3 h).** Goal: the free Space wipes its disk on restart, so request logs go to a **private** HF dataset; the demo says exactly what is logged; a script turns the logs into a usage report. Decisions: retention **30 days**; dataset **`CoolDip00/tiny-llm-space-logs`** (private). If late, cut the report's extras first (busiest hours, snapshot stats).
+      1. **Log shipping** (`obs.py`, `server.py`):
+         - `--log-dir DIR` writes JSONL; `--log-dataset REPO_ID` uploads `DIR` with `huggingface_hub.CommitScheduler` every 10 min (background thread; no new dependency: hub 2.4.0 is already in the env and image).
+         - Files: one per server start per hour, e.g. `logs/2026-11-07/<start>-<replica>-13.jsonl`. Never overwritten across restarts; each upload only touches the current hour's file.
+         - Shipped lines: `request` and `slow request` (with timeline), engine snapshots **thinned to every 30 s** (5 s stays in memory for the status page), `server ready` / `shutting down` / `stopped` (counts restarts). Never `debug` step lines.
+         - Upload failure never affects serving (logged to stderr only). No token or no dataset: logs stay local, one warning.
+         - Shutdown: one forced upload during the graceful drain. A hard kill loses ≤ 10 min of logs (documented).
+         - Dockerfile: `LOG_DATASET=""` (off by default); when set, CMD adds `--log-dir /tmp/tinyllm-logs --log-dataset "$LOG_DATASET"`. `HF_TOKEN` and `TINYLLM_LOG_SALT` are Space secrets in step 5, set by the user (a fine-grained token with write access to that dataset only).
+      2. **Privacy:**
+         - Audit test: a prompt with a marker string goes through every path (200, stream, 400 validation, 400 too long, 429, 504, client disconnect); the marker must not appear in the log file. (400 messages already use pydantic's `msg` without the input; the test pins it.)
+         - Salt: with `TINYLLM_LOG_SALT` set (Space secret), visitors hash the same across restarts, so unique visitors can be counted; without it, random per start. Docs: the salt must stay secret (IPv4 is small enough to brute-force with the salt).
+         - Full notice: SERVING.md privacy section + a "What is logged" `<details>` in the demo footer: fields logged, never text or raw IP, the hash is pseudonymous, private dataset, kept 30 days.
+         - Retention: at start, the server deletes dataset log files older than 30 days in one commit; once a month it also squashes the dataset history (`HfApi.super_squash_history`) so deleted files' history stops using storage. Tested with a fake `HfApi`; failure logged and ignored.
+      3. **`scripts/analyze_logs.py`:** `--dir` (local) or `--dataset REPO_ID` (`snapshot_download`, HF cache), `--since` / `--days`. Report as markdown on stdout + `--json` to a unique file under `runs/logs/` (never overwrite). Contents: period, restarts, uptime; requests / day by status; unique visitors / day; TTFT and latency p50 / p95 / p99; tokens; finish reasons; SLO compliance and error budget over the period (same maths and targets as `obs.py`); errors grouped by message; busiest hours (UTC); queue depth and busy slots from snapshots (input to step 5 sizing). Corrupt or unknown lines skipped and counted.
+      4. **Tests (CPU, no network):** `tests/test_logs.py`: file naming and hourly rotation; only allowed lines shipped; snapshot thinning; scheduler only with `--log-dataset` (fake `CommitScheduler`); final upload on shutdown; retention prune + squash with a fake `HfApi`; the privacy marker audit. `tests/test_analyze_logs.py`: synthetic logs with known answers. `smoke_server.py` unchanged (CI image runs without a dataset).
+      5. **Real proof (ask first; creating the dataset publishes to HF, even private):** create private `CoolDip00/tiny-llm-space-logs`; run the container with `LOG_DATASET` set and the WSL HF login mounted read-only; traffic; stop; confirm files in the dataset; `analyze_logs.py --dataset …`; check the dataset's size on HF (does history count against the 100 GB private quota?).
+      6. **Docs:** SERVING.md Observability rows 8–9 done, privacy section (retention, hard-kill loss, salt secret); README line for `analyze_logs.py`; PROGRESS; tick here.
+      - **Size estimate (2026-11-07; checked in item 5: request 574 B, snapshot 278 B):** request line ~600 B, snapshot ~250 B. With 30 s snapshots ~0.7 MB/day + requests (1k/day ≈ 0.6 MB; 100k/day ≈ 60 MB). 30 days ≈ 40 MB typical, ~2 GB very busy; D-031 ≈ 3×. Git history of the 10-min re-uploads can add up to ~3.5× before HF's chunk dedup. Either way well under 1% of the 100 GB private quota.
+      - Not in step 4: restoring the status page's 7-day window from these logs (PARKING_LOT 2026-11-07; cheap after this step, fits with D-031).
     - **Step 4–5 reminders (not step 3):**
       - Step 4: logs to a private HF dataset (`CommitScheduler`, ~10 min), full privacy notice, `scripts/analyze_logs.py`.
       - Step 5:

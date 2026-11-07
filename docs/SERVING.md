@@ -55,14 +55,25 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
 | 5 | Debug mode | `--log-level debug`: per-step timings (prefill ms, decode ms, admissions, preemptions). Requests slower than the SLO always log their full timeline. `/debug/state` (localhost only) dumps the queue and slots | Debug logs, slow-request log | 4.13 |
 | 6 | Status page | `GET /status`: an HTML page served by our server, with live charts from `/stats/history`: requests / min, latency over time, queue depth, SLO compliance and error budget (see below) | Grafana dashboard | 6.5b |
 | 7 | SLO | e.g. 95% of requests get a first token within 2 s on the Space. The status page shows the share meeting it | SLOs / error budgets | 6.5b |
-| 8 | Log retention | The free Space's disk is wiped on restart, so JSONL logs are uploaded to a **private** HF dataset every ~10 min (`huggingface_hub.CommitScheduler`, write token as a Space secret) | Log shipping and retention | 6.5b |
-| 9 | Usage report | `scripts/analyze_logs.py`: visitors, requests, latency percentiles, errors, busiest hours | Daily ops report | 6.5b |
+| 8 | Log retention | The free Space's disk is wiped on restart, so the logs go to a **private** HF dataset: `--log-dir DIR --log-dataset REPO_ID` (image: `-e LOG_DATASET=…`) writes hourly JSONL and uploads it every 10 min with `huggingface_hub.CommitScheduler`, plus once in the graceful drain; kept 30 days (`src/tinyllm/logship.py`, below) | Log shipping and retention | 6.5b step 4 |
+| 9 | Usage report | `scripts/analyze_logs.py --dataset REPO_ID [--days N] [--json]`: restarts and uptime, requests / day by status, visitors / day, TTFT and latency p50 / p95 / p99, tokens, finish reasons, SLO compliance and error budget over the period, errors grouped, busiest hours (UTC), queue and slot use | Daily ops report | 6.5b step 4 |
+
+### Log shipping (6.5b step 4)
+
+- **Files:** `logs/<YYYY-MM-DD>/<start>-<replica>-<HH>.jsonl` in the dataset (UTC). One file per server start per hour, so restarts never overwrite each other and an upload only touches this run's files. `<replica>` is the Space name (`SPACE_ID`), so several replicas (D-031) can share one dataset.
+- **Shipped lines:** `request` and `slow request` (with its timeline), engine snapshots thinned to one per 30 s (the status page keeps the 5 s ones in memory), `model loaded`, `server ready` (with the TTFT threshold), `shutting down: draining`, `stopped`, and errors **without** their traceback. Never `--log-level debug` lines. stderr keeps the full log as before.
+- **Failures never touch serving.** No token, no access or no network: one warning `log upload off: logs stay local`. A failed upload is logged to stderr by `huggingface_hub` and retried with the next one.
+- **Loss:** a graceful stop (SIGTERM: the Space restarting or rebuilding) uploads once more after the drain. A hard kill loses up to the last 10 minutes.
+- **Retention:** once a day (first at start) the uploader deletes dataset files older than 30 days in one commit, and squashes the dataset's history (`HfApi.super_squash_history`) when its oldest commit is older than 30 days, so deleted files stop using storage. It runs on the uploader's thread, so it never overlaps an upload.
+- **Token:** `HF_TOKEN`, a Space secret set by the owner: a fine-grained token with write access to the log dataset only. Locally, the `hf auth login` token.
+- **Size (estimate, 2026-11-07; measured on the real dataset: request 574 B, snapshot 278 B):** a request line is ~600 B, a snapshot ~250 B: ~0.7 MB / day of snapshots plus ~0.6 MB per 1,000 requests. 30 days ≈ 40 MB at light traffic, ~2 GB if very busy, well under the 100 GB private storage.
 
 ### Privacy rules
 
-- By default we log metadata only (timings, token counts, status), **never prompt or completion text**.
-- Visitors are identified by a salted hash of the IP (salt kept as a Space secret). Raw IPs are never stored.
-- The log dataset is private. The Space page states what is logged.
+- We log metadata only (timings, token counts, status, finish reason, error message), **never prompt or completion text**. Error messages name the field and the limit, never the input (`tests/test_logs.py` sends a marker string through every path: 200, stream, 400 validation, 400 too long, 429, 504 and a client disconnect, and checks it never reaches the shipped files).
+- Visitors are identified by a salted hash of the IP (`TINYLLM_LOG_SALT`, a Space secret). Raw IPs are never stored. The salt must stay secret: there are few enough IPv4 addresses to try them all against a known salt. With the salt set, a visitor hashes the same across restarts, so visitors can be counted over days; without it, the salt is random per start.
+- The hash is pseudonymous, not anonymous: it tells repeat visits apart. The log dataset is private and kept 30 days.
+- The demo page states what is logged ("What is logged" in its footer).
 
 ## Load testing (4.13 step 3)
 

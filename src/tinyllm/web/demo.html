@@ -67,6 +67,9 @@ button:disabled { opacity: 0.5; cursor: default; }
 .msg.error { border-left-color: var(--bad); }
 footer { color: var(--ink-2); font-size: 13px; margin-top: 28px; }
 footer p { margin: 6px 0; }
+footer details { margin: 6px 0; }
+footer summary { cursor: pointer; color: var(--ink); }
+footer ul { margin: 6px 0; padding-left: 20px; }
 @media (max-width: 520px) { .controls { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -108,6 +111,17 @@ footer p { margin: 6px 0; }
       and it can be busy or asleep for a minute.</p>
     <p>Privacy: your text isn't stored. The server keeps request metadata (timings, token counts and a
       salted hash of your address), never the opening or the story.</p>
+    <details>
+      <summary>What is logged</summary>
+      <ul>
+        <li>Per request: time, status, timings (queue wait, time to first token, total), token counts,
+          whether it streamed, why it stopped, the error message if any, and how busy the server was.</li>
+        <li>Your address only as a salted hash: it can tell repeat visits apart, not who you are.
+          Raw addresses are never stored.</li>
+        <li>Never the opening you type or the story the model writes.</li>
+        <li>The log is kept in a private dataset that only the project owner can read, and is deleted after 30 days.</li>
+      </ul>
+    </details>
   </footer>
 </main>
 <script>

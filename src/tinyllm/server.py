@@ -560,7 +560,8 @@ def _finish_record(rec: RequestRecord, job: Job, times: list[float], toks: list[
 
 
 def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
-               metrics: Metrics | None = None) -> FastAPI:
+               metrics: Metrics | None = None, shipper=None) -> FastAPI:
+    """`shipper`: a logship.LogShipper; its last upload runs after the drain."""
     cfg = cfg or ServerConfig()
     metrics = metrics or variants[0].worker.metrics
     srv = Server(variants, cfg, metrics)
@@ -570,12 +571,15 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
         for v in variants:
             v.worker.start()
         srv.started = True
-        log.info("server ready", extra={"fields": {"variants": {v.name: v.version for v in variants}}})
+        log.info("server ready", extra={"fields": {"variants": {v.name: v.version for v in variants},
+                                                   "slo_ttft_s": metrics.slo_ttft_s}})
         yield
         srv.started = False
         log.info("shutting down: draining", extra={"fields": {"drain_s": cfg.drain_s}})
         await asyncio.gather(*(asyncio.to_thread(v.worker.stop, cfg.drain_s) for v in variants))
         log.info("stopped")
+        if shipper is not None:
+            await asyncio.to_thread(shipper.close, cfg.drain_s)
 
     app = FastAPI(title="tinyllm", lifespan=lifespan)
     app.state.srv = srv
@@ -912,9 +916,21 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--drain-s", type=float, default=30.0)
     p.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
     p.add_argument("--log-file", default=None, help="also write JSON lines here")
+    p.add_argument("--log-dir", default=None,
+                   help="write the shipped log lines (no text, no IP) as hourly JSONL here (logship.py)")
+    p.add_argument("--log-dataset", default=None, metavar="REPO_ID",
+                   help="with --log-dir: upload it to this private HF dataset every 10 min")
+    p.add_argument("--log-replica", default=None, help="name in the log file names; default $SPACE_ID or local")
     args = p.parse_args(argv)
+    if args.log_dataset and not args.log_dir:
+        p.error("--log-dataset needs --log-dir")
 
     setup_logging(args.log_level, args.log_file)
+    shipper = None
+    if args.log_dir:
+        from tinyllm.logship import LogShipper
+        shipper = LogShipper(args.log_dir, args.log_dataset, args.log_replica).attach()
+        shipper.start_upload()
     t = time.perf_counter()
     model, tok, name, version = load_variant(args)
     gen = torch.Generator(args.device).manual_seed(args.seed) if args.seed is not None else None
@@ -929,7 +945,8 @@ def main(argv: list[str] | None = None) -> None:
                        drain_s=args.drain_s)
     metrics = Metrics(slo_ttft_s=args.slo_ttft_s)
     worker = EngineWorker(engine, metrics, cfg.max_queue, cfg.snapshot_s, name=name)
-    app = create_app([Variant(name, version, worker, tok, engine.max_len, model.cfg.vocab_size)], cfg, metrics)
+    app = create_app([Variant(name, version, worker, tok, engine.max_len, model.cfg.vocab_size)], cfg, metrics,
+                     shipper)
 
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False,

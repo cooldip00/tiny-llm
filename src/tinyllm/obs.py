@@ -331,13 +331,18 @@ class Metrics:
 
 
 class JsonFormatter(logging.Formatter):
-    """One JSON object per line. Structured fields go in `extra={"fields": {...}}`."""
+    """One JSON object per line. Structured fields go in `extra={"fields": {...}}`.
+    `with_exc=False` leaves tracebacks out (the shipped logs, logship.py)."""
+
+    def __init__(self, with_exc: bool = True):
+        super().__init__()
+        self.with_exc = with_exc
 
     def format(self, record: logging.LogRecord) -> str:
         d = {"ts": round(record.created, 3), "level": record.levelname.lower(),
              "logger": record.name, "msg": record.getMessage()}
         d.update(getattr(record, "fields", None) or {})
-        if record.exc_info:
+        if record.exc_info and self.with_exc:
             d["exc"] = self.formatException(record.exc_info)
         return json.dumps(d, default=str)
 

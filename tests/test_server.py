@@ -74,12 +74,12 @@ class Live:
 
 
 @contextmanager
-def serve(model, n_slots=3, faults=None, **cfg):
+def serve(model, n_slots=3, faults=None, shipper=None, **cfg):
     cfg = ServerConfig(**{"snapshot_s": 0.2, "drain_s": 10.0, **cfg})
     metrics = Metrics()
     worker = EngineWorker(ContinuousEngine(model, n_slots), metrics, cfg.max_queue, cfg.snapshot_s, faults)
     app = create_app([Variant("main", "test-v1", worker, AsciiTokenizer(), CFG.max_seq_len, CFG.vocab_size)],
-                     cfg, metrics)
+                     cfg, metrics, shipper)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning",
                                            access_log=False, lifespan="on"))
     thread = threading.Thread(target=server.run, daemon=True)

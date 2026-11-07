@@ -35,12 +35,15 @@ ARG GIT_COMMIT=unknown
 # REVISION pins the Hub commit of the model upload (scripts/upload_model.py), so a rebuild serves the same weights.
 ENV TINYLLM_GIT_COMMIT=$GIT_COMMIT \
     MODEL=CoolDip00/tiny-llm-tinystories-30m REVISION=b11100b189f9d5085ce8c0fd775ca71a6eaf287c \
-    SLOTS=4 PORT=7860 SLO_TTFT_S=2
+    SLOTS=4 PORT=7860 SLO_TTFT_S=2 LOG_DATASET=""
 
 EXPOSE 7860
-# Shell form so MODEL / REVISION / SLOTS / PORT / SLO_TTFT_S can be overridden with -e; exec keeps uvicorn
-# as PID 1 (SIGTERM → graceful drain). --revision only for a repo id: a mounted folder has none.
-# SLO_TTFT_S: the status page's TTFT SLO threshold, 2 s on the shared CPU (docs/SERVING.md).
+# Shell form so MODEL / REVISION / SLOTS / PORT / SLO_TTFT_S / LOG_DATASET can be overridden with -e; exec
+# keeps uvicorn as PID 1 (SIGTERM → graceful drain, then the last log upload). --revision only for a repo
+# id: a mounted folder has none. SLO_TTFT_S: the status page's TTFT SLO threshold, 2 s on the shared CPU.
+# LOG_DATASET (off when empty): a private HF dataset for the request logs (docs/SERVING.md "Privacy");
+# needs HF_TOKEN with write access to it, and TINYLLM_LOG_SALT to count visitors across restarts.
 CMD exec python -m tinyllm.server --hf-model "$MODEL" \
     $( [ -d "$MODEL" ] || echo --revision "$REVISION" ) \
+    $( [ -z "$LOG_DATASET" ] || echo --log-dir /tmp/tinyllm-logs --log-dataset "$LOG_DATASET" ) \
     --device cpu --host 0.0.0.0 --port "$PORT" --slots "$SLOTS" --slo-ttft-s "$SLO_TTFT_S"
