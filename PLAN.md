@@ -172,6 +172,42 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
       - A Docker Space, built from the same image as the local server; a one-line `docker run` in the README.
       - A CI job that builds the image, starts it on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion.
       - The status page shows the error budget left for each SLO from 4.13 step 3.
+    - _Steps (2026-11-07):_ 1–2 done (model card, Hub upload `b11100b`, `--hf-model`, CPU image, CI `docker` job; see PROGRESS). 3 demo + status pages _(done 2026-11-07, see PROGRESS)_ → 4 logs dataset + privacy notice + `analyze_logs.py` → 5 deploy the Space + scaling design.
+    - **Step 3 plan (agreed 2026-11-07, ~2–3 h).** If late, cut the charts first; the SLO cards stay.
+      1. **Server** (`obs.py`, `server.py`): `GET /stats/history`:
+         - **Per minute for the last 60 min**, grouped from the existing 1 h window (no new storage): requests, ok, 5xx, 429, TTFT p50 / p95, total latency p95.
+         - **Snapshots:** last 1 h of the 5 s engine snapshots (queue length, busy slots, tok/s), 720 max.
+         - **SLOs:** hourly counters for up to 7 days (168 buckets), since the last restart. Per SLO from SERVING.md: good / total, compliance, error budget left, 1 h burn rate, fast-burn flag (> 14.4× the budgeted rate).
+         - **TTFT:** a successful request counts against the budget when its TTFT is over `--slo-ttft-s` (new option; default 1.0 = local target; the Dockerfile sets 2.0). Budget = 5% of successful requests.
+         - **Availability:** status ≥ 500, including 504; target 99%.
+         - **Shed rate:** 429s; shown, but not marked pass / fail: the Space's rated load is unknown until the D-031 load test.
+         - **Excluded:** 400 and 499 count for no SLO.
+         - Cache the result for ~1 s so many open status pages stay cheap. The pages' polling must not count as requests.
+      2. **Demo page `/`** (`src/tinyllm/web/demo.html`, plain HTML + JS, no CDN, relative URLs so the D-031 router can serve the same page):
+         - Framed as TinyStories story continuation; clickable example openings; max tokens and temperature sliders; Stop button.
+         - Streams from `/v1/completions`; shows TTFT and tok/s per run. Model name from `/v1/models`.
+         - Output goes in as text only (no HTML injection). Prompt length capped client-side (the server enforces the 512 context). Friendly 429 / 503 messages.
+         - Footer: model card, GitHub, `/status`; CPU note (the README's speed numbers come from the laptop GPU); short privacy note (full notice in step 4). Light and dark.
+      3. **Status page `/status`** (`web/status.html`), refreshed every 5 s:
+         - Three hand-written SVG charts: requests / min; latency (TTFT p50 / p95 and total p95, with the TTFT target line); queue length and busy slots. Load the dataviz skill before writing chart code.
+         - SLO cards: target, actual, budget left, burn flag, "since restart" label. Numbers also shown as text (not only in charts).
+         - Uptime, model version, norm backend.
+      4. **Leading space** (PARKING_LOT 2026-11-06, "before the Space demo"): check whether the 30M byte-level tokenizer keeps the first token's leading space in served text, then fix `_Detokenizer` for TinyLlama (SentencePiece) with a test. The demo joins prompt + completion.
+      5. **Tests:** `tests/test_status.py`:
+         - SLO and budget maths with a fake clock; the history shape; 400 / 499 excluded.
+         - Both pages return 200 HTML; polling is not counted.
+         - `smoke_server.py` also checks `/`, `/status`, `/stats/history`, so the CI `docker` job covers them.
+      6. **Docs:** SERVING.md status-page section, including the since-restart limit (7-day history from the step-4 logs → PARKING_LOT); one README line; PROGRESS; tick here.
+    - **Step 4–5 reminders (not step 3):**
+      - Step 4: logs to a private HF dataset (`CommitScheduler`, ~10 min), full privacy notice, `scripts/analyze_logs.py`.
+      - Step 5:
+        - Space repo with a README YAML header (`sdk: docker`, `app_port: 7860`).
+        - `--trust-proxy` in the Space CMD.
+        - Space defaults from a CPU load test in the container with `--cpus 2` (free CPU basic is 2 vCPU / 16 GB): `SLOTS`, `--max-queue` sized ≈ TTFT target × throughput (PARKING_LOT "Queue sized from the SLO"), `--rate-limit`.
+        - `smoke_server.py` against the live URL.
+        - Written scaling design.
+        - Links to the Space from the README and the model card (PARKING_LOT README item 3).
+        - Manual push to the Space at first; a GitHub → Space sync Action (HF token as a repo secret, set by the user) later.
     - _D-031 (2026-11-07), about +5–7 h, after the single Docker Space works, before 6.3:_
       - Two replica Spaces from the same image, plus a router Space running our `Router` with a remote-replica mode: polls `/ready` and `/stats`, shortest queue wins, retries elsewhere on a 429 or connection error, wakes a sleeping replica, adds `X-Replica`. CPU tests against fake replicas.
       - The demo and status pages move to the router Space. Spaces only, no separate frontend.

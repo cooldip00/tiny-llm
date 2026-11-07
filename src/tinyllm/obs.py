@@ -7,7 +7,8 @@ Standard library only, so the server and the Space need nothing extra.
 - EngineSnapshot: the engine's load, sampled every few seconds.
 - Metrics: thread-safe aggregator. Rolling windows (5 min, 1 h) back /stats (JSON);
   cumulative counters and histograms back /metrics (Prometheus text format, so a real
-  Prometheus could scrape it unchanged).
+  Prometheus could scrape it unchanged). history() backs /stats/history for the status page
+  (6.5b): the last hour per minute, engine snapshots, and the SLOs with their error budgets.
 - JsonFormatter / setup_logging: every log line is one JSON object.
 """
 
@@ -26,6 +27,43 @@ from dataclasses import asdict, dataclass, field
 WINDOWS = {"5m": 300.0, "1h": 3600.0}
 TTFT_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0)
 LATENCY_BUCKETS = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0)
+
+# SLOs (docs/SERVING.md, 4.13 step 3). Targets are shares of good requests; the TTFT threshold
+# is per server (--slo-ttft-s: 1 s local GPU, 2 s on the Space).
+SLO_TARGETS = {"ttft": 0.95, "availability": 0.99, "shed": 0.99}
+SLO_WINDOW_S = 7 * 24 * 3600.0     # rolling 7 days, but only since the last restart (in memory)
+FAST_BURN = 14.4                   # Google SRE fast-burn threshold, judged on the last hour
+BURN_MIN_REQUESTS = 10             # fewer counted requests in the hour: no flag (too few to judge)
+HISTORY_MINUTES = 60
+
+
+def slo_counted(status: int) -> bool:
+    """Requests the SLOs judge: served (200), shed (429) and server failures (>= 500, incl. 504).
+    Client errors (400) and client disconnects (499) count for none of them."""
+    return status == 200 or status == 429 or status >= 500
+
+
+class _SloBucket:
+    """Counters for one hour of counted requests."""
+    __slots__ = ("counted", "ok", "slow", "failed", "shed")
+
+    def __init__(self):
+        self.counted = self.ok = self.slow = self.failed = self.shed = 0
+
+    def add(self, rec: "RequestRecord", ttft_s: float) -> None:
+        self.counted += 1
+        if rec.status == 200:
+            self.ok += 1
+            self.slow += rec.ttft_s is None or rec.ttft_s > ttft_s
+        elif rec.status == 429:
+            self.shed += 1
+        else:
+            self.failed += 1
+
+    def bad_and_total(self, slo: str) -> tuple[int, int]:
+        if slo == "ttft":
+            return self.slow, self.ok
+        return (self.failed, self.counted) if slo == "availability" else (self.shed, self.counted)
 
 
 def hash_client(ip: str, salt: str) -> str:
@@ -128,10 +166,15 @@ class _Window:
 class Metrics:
     """Thread-safe: handlers call observe(), the engine thread calls snapshot()."""
 
-    def __init__(self, windows: dict[str, float] = WINDOWS, clock=time.monotonic):
+    def __init__(self, windows: dict[str, float] = WINDOWS, clock=time.monotonic, slo_ttft_s: float = 1.0,
+                 wall=time.time):
         self._lock = threading.Lock()
-        self._clock = clock
+        self._clock, self._wall = clock, wall
+        self.slo_ttft_s = slo_ttft_s
         self._windows = {k: _Window(v) for k, v in windows.items()}
+        self._hour = _Window(HISTORY_MINUTES * 60.0)        # per-minute history and the 1 h burn rate
+        self._slo: deque = deque()                          # (hour index since start, _SloBucket)
+        self._snaps: deque = deque()                        # (t_monotonic, EngineSnapshot), last hour
         self._requests: dict[tuple[str, int], int] = {}      # (variant, status) → count
         self._tokens: dict[str, int] = {}                     # variant → completion tokens
         self._ttft: dict[str, _Histogram] = {}
@@ -142,9 +185,16 @@ class Metrics:
     def observe(self, rec: RequestRecord, now: float | None = None) -> None:
         now = self._clock() if now is None else now
         with self._lock:
-            for w in self._windows.values():
+            for w in (*self._windows.values(), self._hour):
                 w.items.append((now, rec))
                 w.prune(now)
+            if slo_counted(rec.status):
+                hour = int((now - self.started) // 3600)
+                if not self._slo or self._slo[-1][0] != hour:
+                    self._slo.append((hour, _SloBucket()))
+                    while self._slo and self._slo[0][0] <= hour - SLO_WINDOW_S / 3600:
+                        self._slo.popleft()
+                self._slo[-1][1].add(rec, self.slo_ttft_s)
             v = rec.variant
             self._requests[(v, rec.status)] = self._requests.get((v, rec.status), 0) + 1
             self._tokens[v] = self._tokens.get(v, 0) + rec.completion_tokens
@@ -153,9 +203,73 @@ class Metrics:
             if rec.status == 200 and rec.latency_s is not None:
                 self._latency.setdefault(v, _Histogram(LATENCY_BUCKETS)).observe(rec.latency_s)
 
-    def snapshot(self, snap: EngineSnapshot) -> None:
+    def snapshot(self, snap: EngineSnapshot, now: float | None = None) -> None:
+        now = self._clock() if now is None else now
         with self._lock:
             self.last_snapshot = snap
+            self._snaps.append((now, snap))
+            while self._snaps and self._snaps[0][0] < now - HISTORY_MINUTES * 60:
+                self._snaps.popleft()
+
+    def history(self, now: float | None = None) -> dict:
+        """/stats/history, for the status page: the last hour per minute, the engine snapshots of the
+        last hour, and each SLO over the rolling 7-day window (since the last restart)."""
+        now = self._clock() if now is None else now
+        wall = self._wall()
+        with self._lock:
+            self._hour.prune(now)
+            recs = list(self._hour.items)
+            snaps = [(t, s) for t, s in self._snaps if t >= now - HISTORY_MINUTES * 60]
+            hour_now = int((now - self.started) // 3600)
+            buckets = [b for h, b in self._slo if h > hour_now - SLO_WINDOW_S / 3600]
+        uptime = now - self.started
+
+        by_min: list[list[RequestRecord]] = [[] for _ in range(HISTORY_MINUTES)]
+        for t, r in recs:
+            ago = int((now - t) // 60)
+            if 0 <= ago < HISTORY_MINUTES:
+                by_min[ago].append(r)
+        minutes = []
+        for ago in range(HISTORY_MINUTES - 1, -1, -1):        # oldest first
+            rs = by_min[ago]
+            ok = [r for r in rs if r.status == 200]
+            ttft = [r.ttft_s for r in ok if r.ttft_s is not None]
+            lat = [r.latency_s for r in ok if r.latency_s is not None]
+            minutes.append({
+                "minutes_ago": ago, "covered": uptime >= ago * 60,   # the server was up for this minute
+                "requests": len(rs), "ok": len(ok),
+                "failed": sum(r.status >= 500 for r in rs), "shed": sum(r.status == 429 for r in rs),
+                "completion_tokens": sum(r.completion_tokens for r in rs),
+                "ttft_p50_s": percentile(ttft, 50), "ttft_p95_s": percentile(ttft, 95),
+                "latency_p95_s": percentile(lat, 95)})
+
+        hour = _SloBucket()
+        for _, r in recs:
+            if slo_counted(r.status):
+                hour.add(r, self.slo_ttft_s)
+        slos = {}
+        for name, target in SLO_TARGETS.items():
+            bad, total = map(sum, zip(*(b.bad_and_total(name) for b in buckets))) if buckets else (0, 0)
+            hbad, htotal = hour.bad_and_total(name)
+            allowed = 1 - target
+            burn = (hbad / htotal) / allowed if htotal else None
+            slos[name] = {
+                "target": target, "good": total - bad, "total": total,
+                "compliance": round((total - bad) / total, 6) if total else None,
+                "met": (total - bad) / total >= target if total else None,
+                "budget_left": round(1 - bad / (allowed * total), 6) if total else None,
+                "burn_rate_1h": round(burn, 3) if burn is not None else None,
+                "requests_1h": htotal,
+                "fast_burn": burn is not None and htotal >= BURN_MIN_REQUESTS and burn > FAST_BURN}
+        slos["ttft"]["threshold_s"] = self.slo_ttft_s
+        slos["shed"]["judged"] = False          # only at or below the rated load, unknown for the Space yet
+
+        return {"now_unix": round(wall, 3), "uptime_s": round(uptime, 1),
+                "slo_window_s": round(min(SLO_WINDOW_S, uptime), 1), "minutes": minutes,
+                "snapshots": [{"seconds_ago": round(now - t, 1), "queue_len": s.queue_len,
+                               "busy_slots": s.busy_slots, "n_slots": s.n_slots,
+                               "tokens_per_s": round(s.tokens_per_s, 1)} for t, s in snaps],
+                "slo": slos, "fast_burn_threshold": FAST_BURN, "burn_min_requests": BURN_MIN_REQUESTS}
 
     def stats(self, now: float | None = None) -> dict:
         """/stats: per rolling window, request counts, rates and latency percentiles."""

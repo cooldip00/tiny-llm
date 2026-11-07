@@ -6,6 +6,7 @@ Standard library only, so it runs anywhere. Waits for /ready (the model loads at
   1. GET /health is {"status": "ok"}, GET /ready is {"ready": true}
   2. one non-streamed completion: 200, finish_reason, usage.completion_tokens >= 1
   3. GET /stats: the request is counted; each variant reports the expected norm_backend
+  4. the pages: GET / and GET /status are HTML; GET /stats/history has 60 minutes and the 3 SLOs
 Exits non-zero with the first failure.
 """
 
@@ -27,6 +28,14 @@ def call(url: str, body: dict | None = None, timeout: float = 30.0) -> tuple[int
             return r.status, json.loads(r.read() or b"null")
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"null")
+
+
+def fetch_text(url: str, timeout: float = 30.0) -> tuple[int, str, str]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status, r.headers.get("content-type", ""), r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("content-type", ""), ""
 
 
 def check(ok: bool, what: str) -> None:
@@ -71,6 +80,14 @@ def main() -> None:
     backends = {name: v.get("norm_backend") for name, v in st["variants"].items()}
     check(bool(backends) and set(backends.values()) == {args.norm_backend},
           f"/stats norm_backend {backends} (expected {args.norm_backend!r})")
+
+    for path, needle in (("/", "v1/completions"), ("/status", "stats/history")):
+        status, ctype, text = fetch_text(f"{base}{path}")
+        check(status == 200 and ctype.startswith("text/html") and needle in text, f"page {path}: {status} {ctype}")
+    status, h = call(f"{base}/stats/history")
+    check(status == 200 and len(h["minutes"]) == 60 and set(h["slo"]) == {"ttft", "availability", "shed"}
+          and h["slo"]["availability"]["total"] >= 1,
+          f"/stats/history: {status}, SLO threshold {h and h['slo']['ttft']['threshold_s']} s")
     print("smoke check passed")
 
 

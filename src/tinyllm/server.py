@@ -19,6 +19,8 @@ Design: docs/SERVING.md.
 - Observability (obs.py): a JSON log line per request, X-Request-ID, engine snapshots,
   /stats, /metrics (Prometheus text format), --log-level debug with per-step timings,
   slow-request timelines, and /debug/state (localhost only).
+- Pages (6.5b): GET / is the demo (story continuation, streamed), GET /status the status page
+  (charts and SLOs from GET /stats/history: the last hour per minute, the 7-day error budget).
 - Router with one variant now; X-Model-Version on every response. Release strategies (6.9)
   add routing rules.
 
@@ -59,7 +61,7 @@ import torch
 from fastapi import FastAPI
 from fastapi import Request as HTTPRequest
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from tinyllm.engine import ContinuousEngine, Request, Sampling
@@ -463,12 +465,33 @@ class _ClientGone(Exception):
     pass
 
 
+WEB = Path(__file__).resolve().parent / "web"
+
+
+def _page(name: str) -> str:
+    """The demo and status pages (6.5b): static HTML + JS in src/tinyllm/web, read per request
+    (small) so an edit shows on reload. They fetch the JSON endpoints with relative URLs."""
+    return (WEB / name).read_text(encoding="utf-8")
+
+
+def decode_completion(tok: Tokenizer, ids: list[int], context: list[int]) -> str:
+    """Completion text as it reads after the prompt. Decoded behind the prompt's last token(s),
+    because a SentencePiece decoder (TinyLlama) drops a leading space at the start of the text:
+    "…named Max." + " Max was" must not come back as "Max was" (byte-level BPE keeps it anyway).
+    Falls back to a plain decode if the context's text isn't a prefix (a partial UTF-8 byte)."""
+    if context:
+        head, text = tok.decode(context), tok.decode(context + ids)
+        if text.startswith(head):
+            return text[len(head):]
+    return tok.decode(ids)
+
+
 class _Detokenizer:
     """Incremental text for streaming: decode everything so far, emit the new suffix; hold
     back while the text ends in a partial UTF-8 character."""
 
-    def __init__(self, tok: Tokenizer):
-        self.tok, self.ids, self.sent = tok, [], ""
+    def __init__(self, tok: Tokenizer, context: list[int] | None = None):
+        self.tok, self.ids, self.sent, self.context = tok, [], "", list(context or [])
 
     def add(self, token: int) -> str:
         self.ids.append(token)
@@ -478,7 +501,7 @@ class _Detokenizer:
         return self._delta(final=True)
 
     def _delta(self, final: bool) -> str:
-        text = self.tok.decode(self.ids)
+        text = decode_completion(self.tok, self.ids, self.context)
         if (not final and text.endswith("�")) or not text.startswith(self.sent):
             return ""
         d, self.sent = text[len(self.sent):], text
@@ -600,6 +623,28 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
                            for v in variants}
         return out
 
+    history_cache: dict = {}
+
+    @app.get("/stats/history")
+    async def stats_history():
+        """For the status page: computed at most once a second, however many pages poll it."""
+        now = time.monotonic()
+        if history_cache.get("t", -1.0) < now - 1.0:
+            out = metrics.history()
+            out["variants"] = {v.name: {"version": v.version, "n_slots": v.worker.engine.n_slots,
+                                        "norm_backend": norm_backend(v.worker.engine.model)}
+                               for v in variants}
+            history_cache.update(t=now, out=out)
+        return history_cache["out"]
+
+    @app.get("/", response_class=HTMLResponse)
+    async def demo_page():
+        return HTMLResponse(_page("demo.html"))
+
+    @app.get("/status", response_class=HTMLResponse)
+    async def status_page():
+        return HTMLResponse(_page("status.html"))
+
     @app.get("/metrics")
     async def prometheus():
         return PlainTextResponse(metrics.prometheus(), media_type="text/plain; version=0.0.4")
@@ -696,7 +741,7 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
             timeline = _finish_record(rec, job, times, toks)
             rec.status, rec.finish_reason = 200, finish
             srv.record(rec, timeline)
-            choice = {"index": 0, "text": variant.tokenizer.decode(toks), "logprobs": None,
+            choice = {"index": 0, "text": decode_completion(variant.tokenizer, toks, ids[-1:]), "logprobs": None,
                       "finish_reason": finish}
             if body.return_token_ids:
                 choice["token_ids"] = toks
@@ -712,7 +757,7 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
             return f"data: {json.dumps(d)}\n\n"
 
         async def stream():
-            toks, times, detok, done = [], [], _Detokenizer(variant.tokenizer), False
+            toks, times, detok, done = [], [], _Detokenizer(variant.tokenizer, ids[-1:]), False
             try:
                 async for it in items(None):          # disconnect: Starlette cancels this generator
                     if it.kind == "error":
@@ -861,6 +906,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--rate-limit", type=float, default=0.0, help="requests/min per client; 0 = off")
     p.add_argument("--rate-burst", type=int, default=10)
     p.add_argument("--slow-s", type=float, default=10.0)
+    p.add_argument("--slo-ttft-s", type=float, default=1.0,
+                   help="TTFT SLO threshold on /status (SERVING.md: 1 s local GPU, 2 s on the Space)")
     p.add_argument("--trust-proxy", action="store_true", help="client IP from X-Forwarded-For")
     p.add_argument("--drain-s", type=float, default=30.0)
     p.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
@@ -880,7 +927,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = ServerConfig(max_queue=args.max_queue, timeout_s=args.timeout, rate_per_min=args.rate_limit,
                        rate_burst=args.rate_burst, slow_s=args.slow_s, trust_proxy=args.trust_proxy,
                        drain_s=args.drain_s)
-    metrics = Metrics()
+    metrics = Metrics(slo_ttft_s=args.slo_ttft_s)
     worker = EngineWorker(engine, metrics, cfg.max_queue, cfg.snapshot_s, name=name)
     app = create_app([Variant(name, version, worker, tok, engine.max_len, model.cfg.vocab_size)], cfg, metrics)
 

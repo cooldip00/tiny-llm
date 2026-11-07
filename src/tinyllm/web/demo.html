@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tiny-llm demo</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --ring: rgba(11,11,11,0.10); --accent: #2a78d6; --on-accent: #fff;
+  --gen: #e8f1fc; --bad: #d03b3b; --warn: #fab219;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --ring: rgba(255,255,255,0.10); --accent: #3987e5; --gen: #12243a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --ring: rgba(255,255,255,0.10); --accent: #3987e5; --gen: #12243a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+       font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 28px 16px 48px; }
+h1 { font-size: 24px; margin: 0; font-weight: 600; }
+.lede { color: var(--ink-2); margin: 4px 0 20px; }
+a { color: var(--accent); }
+.panel { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 16px; }
+label { font-size: 14px; color: var(--ink-2); }
+textarea { width: 100%; min-height: 84px; resize: vertical; margin: 6px 0 4px; padding: 10px 12px;
+           font: inherit; color: var(--ink); background: var(--page); border: 1px solid var(--ring); border-radius: 8px; }
+textarea:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.count { font-size: 12px; color: var(--muted); text-align: right; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 14px; }
+.chip { font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+        color: var(--ink-2); background: transparent; border: 1px solid var(--ring); }
+.chip:hover { color: var(--ink); border-color: var(--muted); }
+.controls { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; }
+.controls div { display: flex; flex-direction: column; }
+.controls output { color: var(--ink); font-variant-numeric: tabular-nums; }
+input[type=range] { accent-color: var(--accent); width: 100%; }
+.actions { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+button.primary, button.secondary { font: inherit; font-size: 15px; padding: 8px 18px; border-radius: 8px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent); }
+button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--ring); }
+button:disabled { opacity: 0.5; cursor: default; }
+.hint { font-size: 13px; color: var(--muted); }
+.story { margin-top: 16px; min-height: 120px; white-space: pre-wrap; font-size: 17px; line-height: 1.65; }
+.story .p { color: var(--ink-2); }
+.story .g { background: var(--gen); border-radius: 3px; }
+.story .placeholder { color: var(--muted); }
+.cursor { display: inline-block; width: 8px; height: 1.1em; vertical-align: text-bottom; background: var(--accent);
+          margin-left: 1px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+.stats { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 12px; font-size: 13px; color: var(--ink-2);
+         font-variant-numeric: tabular-nums; }
+.stats b { color: var(--ink); font-weight: 600; }
+.msg { display: none; margin-top: 12px; padding: 8px 12px; border-radius: 8px; font-size: 14px;
+       border: 1px solid var(--ring); border-left: 4px solid var(--warn); }
+.msg.show { display: block; }
+.msg.error { border-left-color: var(--bad); }
+footer { color: var(--ink-2); font-size: 13px; margin-top: 28px; }
+footer p { margin: 6px 0; }
+@media (max-width: 520px) { .controls { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>tiny-llm</h1>
+  <p class="lede">A small language model trained from scratch on children's stories.
+    Start a story and it writes the rest.
+    It knows simple stories, not facts, so it can't answer questions or follow instructions.</p>
+
+  <section class="panel">
+    <label for="prompt">Story opening</label>
+    <textarea id="prompt" maxlength="600" spellcheck="true">Once upon a time, there was a little dog named Max.</textarea>
+    <div class="count" id="count"></div>
+    <div class="chips" id="chips" aria-label="Example openings"></div>
+    <div class="controls">
+      <div><label for="len">Length: <output id="len-out"></output> tokens</label>
+        <input type="range" id="len" min="20" max="250" step="10" value="120"></div>
+      <div><label for="temp">Temperature: <output id="temp-out"></output></label>
+        <input type="range" id="temp" min="0" max="1.5" step="0.1" value="0.8"></div>
+    </div>
+    <div class="actions">
+      <button class="primary" id="go">Write the story</button>
+      <button class="secondary" id="stop" disabled>Stop</button>
+      <span class="hint">Ctrl + Enter. Lower temperature: safer and more repetitive; higher: more surprising.</span>
+    </div>
+  </section>
+
+  <div class="msg" id="msg" role="status"></div>
+  <div class="story" id="story" aria-live="polite"><span class="placeholder">The story appears here, one token at a time.</span></div>
+  <div class="stats" id="stats"></div>
+
+  <footer>
+    <p>Model: <span id="model">loading…</span> ·
+      <a href="https://huggingface.co/CoolDip00/tiny-llm-tinystories-30m">model card</a> ·
+      <a href="https://github.com/cooldip00/tiny-llm">source on GitHub</a> ·
+      <a href="status">server status</a></p>
+    <p>This demo runs on a shared CPU, so it is slower than the GPU numbers in the project README,
+      and it can be busy or asleep for a minute.</p>
+    <p>Privacy: your text isn't stored. The server keeps request metadata (timings, token counts and a
+      salted hash of your address), never the opening or the story.</p>
+  </footer>
+</main>
+<script>
+"use strict";
+const EXAMPLES = [
+  "Once upon a time, there was a little dog named Max.",
+  "Lily found a shiny key under her bed.",
+  "The sun was hot, and Tom wanted to swim.",
+  "One day, a small bird could not fly.",
+  "Mia and her mom baked a big cake.",
+];
+const MAX_CHARS = 600;
+const $ = (id) => document.getElementById(id);
+const prompt = $("prompt"), story = $("story"), stats = $("stats"), msg = $("msg");
+let ctrl = null;
+
+for (const ex of EXAMPLES) {
+  const b = document.createElement("button");
+  b.className = "chip"; b.type = "button"; b.textContent = ex;
+  b.onclick = () => { prompt.value = ex; updateCount(); prompt.focus(); };
+  $("chips").appendChild(b);
+}
+function updateCount() { $("count").textContent = `${prompt.value.length} / ${MAX_CHARS}`; }
+function bindRange(id, fmt) {
+  const r = $(id), o = $(id + "-out");
+  const f = () => { o.textContent = fmt(r.value); };
+  r.oninput = f; f();
+}
+bindRange("len", (v) => v);
+bindRange("temp", (v) => Number(v).toFixed(1));
+prompt.oninput = updateCount; updateCount();
+prompt.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); start(); } };
+$("go").onclick = start;
+$("stop").onclick = () => ctrl && ctrl.abort();
+
+fetch("v1/models").then((r) => r.json()).then((d) => {
+  const m = d.data && d.data[0];
+  $("model").textContent = m ? (m.version || m.id) : "unknown";
+}).catch(() => { $("model").textContent = "unavailable"; });
+
+function say(text, kind) {
+  msg.textContent = text;
+  msg.className = "msg show" + (kind === "error" ? " error" : "");
+}
+function stat(label, value) {
+  const s = document.createElement("span");
+  const b = document.createElement("b"); b.textContent = value;
+  s.append(document.createTextNode(label + " "), b);
+  return s;
+}
+function showStats(t) {
+  const items = [];
+  if (t.ttft !== null) items.push(stat("First token", Math.round(t.ttft * 1000) + " ms"));
+  if (t.tokens > 1 && t.genS > 0) items.push(stat("Speed", ((t.tokens - 1) / t.genS).toFixed(1) + " tokens/s"));
+  items.push(stat("Tokens", String(t.tokens)));
+  if (t.finish) items.push(stat("Stopped because", t.finish === "stop" ? "the story ended" :
+                                t.finish === "length" ? "it reached the length" : t.finish));
+  stats.replaceChildren(...items);
+}
+function errorText(status, body, retry) {
+  if (status === 429) return `The server is busy right now. Please try again in ${retry || "a few"} seconds.`;
+  if (status === 503) return "The model is still loading (or the server is waking up). Try again in a minute.";
+  if (status === 504) return "That took too long and was stopped. Try a shorter length.";
+  if (status === 400) return "The request wasn't accepted: " + ((body && body.error && body.error.message) || "bad input");
+  return `Something went wrong on the server (${status}). Please try again.`;
+}
+
+async function start() {
+  if (ctrl) return;
+  const text = prompt.value.slice(0, MAX_CHARS);
+  if (!text.trim()) { say("Write the start of a story first."); return; }
+  msg.className = "msg";
+  const pSpan = document.createElement("span"), gSpan = document.createElement("span"), cur = document.createElement("span");
+  pSpan.className = "p"; gSpan.className = "g"; cur.className = "cursor";
+  pSpan.textContent = text;
+  story.replaceChildren(pSpan, gSpan, cur);
+  stats.replaceChildren();
+  ctrl = new AbortController();
+  $("go").disabled = true; $("stop").disabled = false;
+  const t = { t0: performance.now(), ttft: null, tFirst: 0, genS: 0, tokens: 0, finish: null };
+  try {
+    const r = await fetch("v1/completions", {
+      method: "POST", headers: { "content-type": "application/json" }, signal: ctrl.signal,
+      body: JSON.stringify({ prompt: text, max_tokens: Number($("len").value),
+                             temperature: Number($("temp").value), stream: true }),
+    });
+    if (!r.ok) {
+      let body = null; try { body = await r.json(); } catch (e) {}
+      throw { status: r.status, body, retry: r.headers.get("retry-after") };
+    }
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 2);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        const ev = JSON.parse(data);
+        if (ev.error) throw { status: ev.error.code, body: ev };
+        const ch = ev.choices[0], now = performance.now();
+        if (t.ttft === null) { t.ttft = (now - t.t0) / 1000; t.tFirst = now; }
+        t.genS = (now - t.tFirst) / 1000;
+        if (ev.usage) t.tokens = ev.usage.completion_tokens; else t.tokens += 1;
+        if (ch.text) gSpan.textContent += ch.text;
+        if (ch.finish_reason) t.finish = ch.finish_reason;
+        showStats(t);
+      }
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") { t.finish = "you pressed Stop"; showStats(t); }
+    else if (e && e.status) say(errorText(e.status, e.body, e.retry), e.status === 429 || e.status === 503 ? "warn" : "error");
+    else say("Can't reach the server. Check your connection, or try again in a minute.", "error");
+  } finally {
+    cur.remove();
+    ctrl = null;
+    $("go").disabled = false; $("stop").disabled = true;
+  }
+}
+</script>
+</body>
+</html>

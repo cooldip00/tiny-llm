@@ -53,7 +53,7 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
 | 3 | Engine snapshots | Every ~5 s: queue length, busy slots, tok/s, KV used, RAM / VRAM | Infrastructure metrics | 4.13 |
 | 4 | `/stats`, `/metrics` | `/stats`: JSON over rolling windows (5 min, 1 h) with request count, latency percentiles, error and reject rates. `/metrics`: the same in Prometheus text format, so a real Prometheus could scrape it unchanged | Metrics endpoint | 4.13 |
 | 5 | Debug mode | `--log-level debug`: per-step timings (prefill ms, decode ms, admissions, preemptions). Requests slower than the SLO always log their full timeline. `/debug/state` (localhost only) dumps the queue and slots | Debug logs, slow-request log | 4.13 |
-| 6 | Status page | An HTML page served by our server, with live charts from `/stats`: requests / min, latency over time, queue depth, SLO compliance | Grafana dashboard | 6.5b |
+| 6 | Status page | `GET /status`: an HTML page served by our server, with live charts from `/stats/history`: requests / min, latency over time, queue depth, SLO compliance and error budget (see below) | Grafana dashboard | 6.5b |
 | 7 | SLO | e.g. 95% of requests get a first token within 2 s on the Space. The status page shows the share meeting it | SLOs / error budgets | 6.5b |
 | 8 | Log retention | The free Space's disk is wiped on restart, so JSONL logs are uploaded to a **private** HF dataset every ~10 min (`huggingface_hub.CommitScheduler`, write token as a Space secret) | Log shipping and retention | 6.5b |
 | 9 | Usage report | `scripts/analyze_logs.py`: visitors, requests, latency percentiles, errors, busiest hours | Daily ops report | 6.5b |
@@ -137,6 +137,24 @@ All three are measured on the server, from the request log and `/stats` (arrival
   - the slow-request timeline log (`--slow-s`, set to the TTFT target in practice)
   - goodput in the load test
   - the canary's automatic rollback in 6.9: roll back when the canary breaks an SLO that live meets
+
+### Demo and status pages (6.5b step 3)
+
+Both pages are static HTML + JS in `src/tinyllm/web/`, served by the server itself, with no CDN and relative URLs (so the D-031 router can serve them in front of the replicas).
+
+- `GET /`: the demo. Story continuation streamed from `/v1/completions` (`stream: true`), with length and temperature sliders, a Stop button (the server sees a disconnect: 499, the slot is freed), TTFT and tokens/s, and plain messages for 429 / 503.
+- `GET /status`: the status page. It polls `GET /stats/history` every 5 s:
+  - the last 60 minutes per minute: requests (served / 429 / 5xx), TTFT p50 / p95 and latency p95 against the SLO line
+  - engine snapshots from the last hour: busy slots and queue length
+  - one card per SLO: compliance, Met / Missed, error budget left, 1 h burn rate with the fast-burn flag
+- `/stats/history` is computed at most once a second, however many pages poll it. Page and stats requests are not counted in the request metrics or the SLOs.
+- SLO maths (`Metrics.history`, tested in `tests/test_status.py`):
+  - TTFT: bad = a served request (200) whose TTFT is above `--slo-ttft-s` (1 s by default; the Docker image sets 2 s); total = served requests
+  - availability: bad = status ≥ 500; total = 200 + 429 + ≥ 500
+  - shed: bad = 429, same total. Shown but **not judged**: the rated load of the Space is unknown until the D-031 load test, and above it 429s are intended.
+  - budget left = 1 − bad / ((1 − target) × total). It goes negative once the budget is spent (the page shows "used up").
+  - burn rate = (bad / total over the last hour) / (1 − target). Flagged above 14.4× when the hour has ≥ 10 counted requests.
+- **Limit: the 7-day window starts at the last restart.** Counters are kept in memory per hour, and a free Space restarts often (sleep, rebuilds), so in practice the window is "since the last restart". The page says so. Restoring the full window from the logs dataset (step 4) is parked.
 
 ## Prefix caching (not implemented; noted 2026-11-06 in 4.8a)
 
