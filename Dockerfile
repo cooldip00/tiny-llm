@@ -32,8 +32,9 @@ COPY --chown=user src/tinyllm ./src/tinyllm
 COPY --chown=user tokenizer ./tokenizer
 
 ARG GIT_COMMIT=unknown
+# REVISION pins the Hub commit of the model upload (scripts/upload_model.py), so a rebuild serves the same weights.
 ENV TINYLLM_GIT_COMMIT=$GIT_COMMIT \
-    MODEL=CoolDip00/tiny-llm-tinystories-30m REVISION=main \
+    MODEL=CoolDip00/tiny-llm-tinystories-30m REVISION=b11100b189f9d5085ce8c0fd775ca71a6eaf287c \
     SLOTS=4 PORT=7860
 
 EXPOSE 7860
