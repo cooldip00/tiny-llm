@@ -26,6 +26,11 @@ teacher-forced passes are prefill-sized, so they take the torch path and match i
 construction; the decode-path check is its greedy rows. --engine kv-graph times every variant with
 CUDA graphs (the D-016 judge). Default output names carry both: int8_graph_triton.json etc.
 Without the flags, the run and its output name are as before.
+
+While one variant is timed, the others wait in host memory (`place`), as in real use where one
+model is loaded. Before 2026-11-07 the bf16 weights (2.1 GB) stayed on the GPU while int8 was
+timed, and int8 at batch 32 reserved ~8.7 GB of the 8 GB card: WSL spilled to host memory.
+Quality checks still run with every variant on the GPU (they are not timed).
 """
 
 import argparse
@@ -40,6 +45,7 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent))
+import bench_generate  # noqa: E402
 from bench_generate import bench, kv_greedy, make_prompts, use_model, val_tokens  # noqa: E402
 
 from tinyllm.generate import generate
@@ -85,6 +91,29 @@ def shared_copy(model, backend: str):
     assert all(a is b for a, b in zip(model.buffers(), twin.buffers()))
     assert all(a is b for a, b in zip(model.parameters(), twin.parameters()))
     return twin
+
+
+def tensors(m) -> list:
+    return list(itertools.chain(m.parameters(), m.buffers()))
+
+
+def place(models, device: str) -> None:
+    """Move every parameter and buffer of `models` to `device` in place (t.data), so module trees
+    that share tensors (int8 / int8-triton) move together and stay shared."""
+    seen = set()
+    for m in models:
+        for t in tensors(m):
+            if id(t) not in seen:
+                seen.add(id(t))
+                t.data = t.data.to(device)
+
+
+def time_alone(variants: dict, groups: dict, name: str, device: str) -> None:
+    """Only `name`'s weight group on `device`; every other group in host memory."""
+    place([m for k, m in variants.items() if groups[k] != groups[name]], "cpu")
+    torch.cuda.empty_cache()
+    place([m for k, m in variants.items() if groups[k] == groups[name]], device)
+    bench_generate._DECODERS.clear()    # graphs captured before a move point at freed memory
 
 
 def main() -> None:
@@ -162,6 +191,11 @@ def main() -> None:
 
     batches = list(map(int, args.batch_sizes.split(",")))
     runs = {k: {b: [] for b in batches} for k in variants}
+    groups = {k: "int8" if k == "int8-triton" else k for k in variants}      # variants sharing weights
+    for g in set(groups.values()):                                           # groups must not share
+        mine = {id(t) for k in variants if groups[k] == g for t in tensors(variants[k])}
+        rest = {id(t) for k in variants if groups[k] != g for t in tensors(variants[k])}
+        assert not mine & rest, f"weight group {g} shares tensors with another group"
     prov = Provenance(weights=("bf16 / int8 (per row), bf16 autocast" if tiny else
                                "fp32 + bf16 autocast / bf16 / int8 (per row)"), script="bench_quant",
                       rounds=args.rounds, model="tinyllama" if tiny else args.ckpt,
@@ -169,6 +203,7 @@ def main() -> None:
     for r in range(args.rounds):
         for b in batches:
             for k, m in variants.items():
+                time_alone(variants, groups, k, dev)
                 runs[k][b].append(bench(m, args.engine, b, args.prompt_len, args.new_tokens, 3, 5, dev))
         print(f"round {r + 1}/{args.rounds}: " + " | ".join(
             f"B={b} " + "/".join(f"{runs[k][b][-1]['decode_tok_s']:.0f}" for k in variants) for b in batches)
@@ -189,7 +224,7 @@ def main() -> None:
 
     extra = {"triton_configs": int8_gemv.best_configs()} if args.triton else {}
     out.write_text(json.dumps({"model": "tinyllama" if tiny else args.ckpt, "baseline": base, "gpu": torch.cuda.get_device_name(), "torch": torch.__version__,
-                               "engine": args.engine, "provenance": provenance, "weights_mib": sizes, "val_loss": losses,
+                               "engine": args.engine, "timed_alone": True, "provenance": provenance, "weights_mib": sizes, "val_loss": losses,
                                "eval_batches": args.eval_batches, "teacher_forced": tf, "greedy_rows_identical": same,
                                "rows": rows, **extra}, indent=2))
     print(f"wrote {out}")
