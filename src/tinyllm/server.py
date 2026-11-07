@@ -26,6 +26,11 @@ Run the local GPU server (TinyLlama) or our 30M model:
 
     uv run python -m tinyllm.server --model tinyllama --slots 8 --cuda-graph
     uv run python -m tinyllm.server --ckpt checkpoints/main/best.pt --slots 8
+
+or our 30M model in HF format (6.5b), from a folder or from the Hub (the Docker image does this):
+
+    uv run python -m tinyllm.server --hf-model runs/export/tinystories-30m
+    uv run python -m tinyllm.server --hf-model CoolDip00/tiny-llm-tinystories-30m --device cpu
 """
 
 from __future__ import annotations
@@ -777,10 +782,49 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()[:8]
 
 
+HF_MODEL_FILES = ["config.json", "generation_config.json", "model.safetensors", "tokenizer.json",
+                  "tokenizer_config.json"]
+
+
+def resolve_hf_model(ref: str, revision: str | None = None, local_only: bool = False) -> Path:
+    """--hf-model: a local folder as is, else a Hub repo id downloaded to the HF cache (6.5b)."""
+    if Path(ref).is_dir():
+        if revision:
+            raise ValueError("--revision is for a Hub repo id, not a local folder")
+        return Path(ref)
+    from huggingface_hub import snapshot_download
+    return Path(snapshot_download(ref, revision=revision, allow_patterns=HF_MODEL_FILES,
+                                  local_files_only=local_only))
+
+
+def load_story_hf(path: Path, device: str) -> tuple[torch.nn.Module, Tokenizer]:
+    """Our story model as exported by scripts/export_hf.py (4.8b): fp32, as trained (like --ckpt).
+
+    Only that export: its tokenizer is our TinyStories BPE (no BOS, EOS <|endoftext|>), which
+    StoryTokenizer reads from the folder. Any other Llama folder would be tokenized wrongly.
+    """
+    from tinyllm.hf_llama import load_from_dir
+    from tinyllm.tokenizer import EOS
+    tc = json.loads((path / "tokenizer_config.json").read_text())
+    if tc.get("eos_token") != EOS or tc.get("add_bos_token") or tc.get("bos_token"):
+        raise ValueError(f"{path}: not a tinyllm story-model export (eos {tc.get('eos_token')!r}, "
+                         f"bos {tc.get('bos_token')!r}); for TinyLlama use --model tinyllama")
+    tok = StoryTokenizer(path / "tokenizer.json")
+    eos_cfg = json.loads((path / "config.json").read_text()).get("eos_token_id")
+    if tok.eos_id != eos_cfg:
+        raise ValueError(f"{path}: tokenizer EOS id {tok.eos_id} != config.json eos_token_id {eos_cfg}")
+    return load_from_dir(path, device=device, dtype=torch.float32), tok
+
+
 def load_variant(args) -> tuple[torch.nn.Module, Tokenizer, str, str]:
-    """(model, tokenizer, name, version) from --model tinyllama or --ckpt."""
+    """(model, tokenizer, name, version) from --model tinyllama, --ckpt or --hf-model."""
     from tinyllm.model import Transformer
     device = args.device
+    if args.hf_model:
+        path = resolve_hf_model(args.hf_model, args.revision, args.offline)
+        model, tok = load_story_hf(path, device)
+        name = args.hf_model.rstrip("/").split("/")[-1]
+        return model, tok, name, f"{name}@{_file_hash(path / 'model.safetensors')}+{git_commit()}"
     if args.ckpt:
         from tinyllm.config import ModelConfig
         path = Path(args.ckpt)
@@ -800,7 +844,10 @@ def main(argv: list[str] | None = None) -> None:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--model", choices=["tinyllama"])
     src.add_argument("--ckpt", help="our checkpoint, e.g. checkpoints/main/best.pt")
-    p.add_argument("--offline", action="store_true", help="TinyLlama from the HF cache only")
+    src.add_argument("--hf-model", metavar="DIR_OR_REPO",
+                     help="our model in HF format (scripts/export_hf.py): a folder, or a Hub repo id")
+    p.add_argument("--revision", default=None, help="with a --hf-model repo id: branch, tag or commit")
+    p.add_argument("--offline", action="store_true", help="Hub models from the HF cache only")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)

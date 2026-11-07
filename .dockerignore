@@ -1,0 +1,7 @@
+# Allow-list: the image needs only the package and the tokenizer (see Dockerfile).
+# Never data, checkpoints, runs, wandb, .venv, notes or secrets.
+*
+!src/tinyllm/
+!tokenizer/tinystories-bpe8192.json
+**/__pycache__
+**/*.pyc

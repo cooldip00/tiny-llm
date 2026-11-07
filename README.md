@@ -137,9 +137,10 @@ flowchart LR
 | `src/tinyllm/kernels/` | Triton kernels: INT8 matmul for decode; RMSNorm fused with the residual add (the default on GPU; training and CPU use PyTorch) |
 | `src/tinyllm/hf_llama.py`, `safetensors_io.py`, `logit_compare.py` | Loads Llama-format checkpoints (TinyLlama) and exports to them; compares logits with a reference model |
 | `src/tinyllm/server.py`, `obs.py` | OpenAI-compatible HTTP server (streaming, 429s past capacity, timeouts); JSON logs and Prometheus metrics |
+| `Dockerfile`, `hf/` | CPU image of the server; the Hugging Face model card |
 | `src/tinyllm/provenance.py`, `results.py`, `plots.py` | Records where each benchmark number came from (commit, versions, GPU clocks); renders the results tables and plots |
 | `scripts/` | Data, tokenizer, benchmark, load-test (`load_test.py`) and HF export (`export_hf.py`) scripts |
-| `tests/` | 426 tests: every optimized path is checked against the slow reference path |
+| `tests/` | 432 tests: every optimized path is checked against the slow reference path |
 | `docs/` | Write-ups with the method and dated results of each step: [ARCHITECTURE](docs/ARCHITECTURE.md), [INFERENCE](docs/INFERENCE.md), [SERVING](docs/SERVING.md). Generated tables: [RESULTS](docs/RESULTS.md). Also [HARDWARE](docs/HARDWARE.md), [SETUP](docs/SETUP.md), [RESEARCH](docs/RESEARCH.md) (the attention ablation plan) and [PRIOR_ART](docs/PRIOR_ART.md) (related projects). `docs/img/` holds the plots, drawn by `scripts/bench_all.py` from the runs and `docs/data/` |
 
 ## Reproduce
@@ -167,12 +168,17 @@ uv run python scripts/bench_quant.py --model tinyllama
 uv run python -m tinyllm.server --model tinyllama --cuda-graph
 uv run python scripts/load_test.py --rates 1,2,4 --power-mode performance
 
+# Serve the 30M model on CPU with Docker (no GPU needed; the weights download from the Hugging Face Hub)
+docker build -t tinyllm --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) .
+docker run --rm -p 7860:7860 tinyllm
+curl localhost:7860/v1/completions -H 'content-type: application/json' -d '{"prompt": "Once upon a time", "max_tokens": 60}'
+
 # Every results table: rerun all benchmarks (~1.5–2 h), then render docs/RESULTS.md and the README tables
 uv run python scripts/bench_all.py --run --power-mode performance
 uv run python scripts/bench_all.py               # re-render from the saved JSON, no GPU
 ```
 
-CI runs the CPU test suite on every push. GPU benchmark numbers come from the laptop. The benchmark scripts save each result with the commit, library versions, and the GPU clocks and throttling seen during the run.
+CI runs the CPU test suite on every push, and builds the Docker image and checks that it serves. The image is CPU-only (PyTorch code paths, no Triton or CUDA graphs), so it is much slower than the numbers above. GPU benchmark numbers come from the laptop. The benchmark scripts save each result with the commit, library versions, and the GPU clocks and throttling seen during the run.
 
 ## Roadmap
 
