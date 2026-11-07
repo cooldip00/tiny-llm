@@ -44,7 +44,7 @@ from tinyllm.cuda_graph import GraphDecoder
 from tinyllm.data import DATA_DIR, TOKEN_DTYPE, load_tokens
 from tinyllm.generate import generate, sample
 from tinyllm.kv_cache import KVCache
-from tinyllm.model import RotaryEmbedding, Transformer
+from tinyllm.model import RotaryEmbedding, Transformer, norm_backend
 from tinyllm.provenance import Provenance, claim_output
 from tinyllm.train import load_checkpoint
 
@@ -410,6 +410,7 @@ def main() -> None:
     rows = []
     prov = Provenance(weights=f"{args.dtype} + bf16 autocast", script="bench_generate",
                       engine=args.engine, model="tinyllama" if tiny else args.ckpt,
+                      norm_backend="hf" if args.engine == "hf" else norm_backend(),
                       warmup=args.warmup, repeats=args.repeats).start()
     for b in map(int, args.batch_sizes.split(",")):
         for plen in map(int, args.prompt_lens.split(",")):

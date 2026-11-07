@@ -6,7 +6,7 @@ Every number on this page comes from **one** run of `scripts/bench_all.py --run`
 
 - **Run:** 2026-11-06T11:29:34+00:00 → 2026-11-06T12:57:45+00:00 UTC, commit `a765817`, NitroSense **performance**.
 - **Machine:** NVIDIA GeForce RTX 3070 Ti Laptop GPU, driver 610.91, torch 2.14.1+cu130, CUDA 13.0.
-- **Rerun later with `--only`:** 2026-11-06, commit `a765817`, NitroSense **performance**: 30m-serving (finished 13:20 UTC, started at 43.0 °C); 2026-11-07, commit `2fdd1dc`, NitroSense **performance-fans-max-room-fan-overhead**: tl-int8-gemv (finished 06:49 UTC, started at 39.0 °C), tl-int8 (finished 07:08 UTC, started at 49.0 °C), tl-int8-graph (finished 07:26 UTC, started at 50.0 °C). Every other benchmark is from the run above.
+- **Rerun later with `--only`:** 2026-11-06, commit `a765817`, NitroSense **performance**: 30m-serving (finished 13:20 UTC, started at 43.0 °C); 2026-11-07, commit `2fdd1dc`, NitroSense **performance-fans-max-room-fan-overhead**: tl-int8-gemv (finished 06:49 UTC, started at 39.0 °C), tl-int8 (finished 07:08 UTC, started at 49.0 °C), tl-int8-graph (finished 07:26 UTC, started at 50.0 °C); 2026-11-07, commit `891814c`, NitroSense **performance-fans-max-room-fan-overhead**: tl-rmsnorm (finished 08:21 UTC, started at 40.0 °C). Every other benchmark is from the run above.
 - **How to read it:** ratios between rows of one table are the reliable result; they share a session and its heat. Absolute tok/s on this laptop moves 10–20% between sessions with temperature, so each table ends with its heat line. ⚠ marks a hardware slowdown, or a thermal slowdown with the busy clock median below 1,400 MHz.
 - **Elsewhere:** dated results and the reasoning behind each step are in [INFERENCE.md](INFERENCE.md); ours vs vLLM vs llama.cpp under load (4.8a) is in [SERVING.md](SERVING.md).
 - **Reproduce:** `uv run python scripts/bench_all.py` re-renders this page and the README tables from the saved JSON in seconds, with no GPU. `--run --power-mode <mode>` reruns everything (~1.5–2 h); `--only <bench>` reruns one benchmark.
@@ -100,6 +100,18 @@ _Heat (busy SM clock median, peak GPU temperature, throttle reasons): tl-int8-gr
 Time for every matmul of one decode step (the 155 Linears), replayed in CUDA graphs over weight copies larger than the L2 cache, so each call reads its weight from memory. At 1 row, a step must read 1,975 MiB of bf16 weights or 991 MiB of int8 weights and scales: bf16 runs at 86% of the measured 423 GB/s, the Triton kernel at 81%. PyTorch int8 casts each weight back to bf16 first, so it moves more bytes than bf16, not fewer.
 
 _Heat (busy SM clock median, peak GPU temperature, throttle reasons): tl-int8-gemv: 1,792 MHz (min 1,260), 81 °C, sw_power_cap + sw_thermal_slowdown._
+
+### Fused RMSNorm + residual add (Triton, 4.10a)
+
+| Batch | PyTorch norm tok/s | Triton norm tok/s | Triton vs PyTorch | ms per step |
+|---|---|---|---|---|
+| 1 | 128 | 137 | 1.07× | 7.83 → 7.30 |
+| 8 | 844 | 897 | 1.06× | 9.48 → 8.92 |
+| 32 | 2,073 | 2,162 | 1.04× | 15.44 → 14.80 |
+
+KV cache + CUDA graphs, the two norms alternating at each batch size. At batch 1 a decode step runs 1,164 GPU ops with the PyTorch norm and 827 with the Triton kernels (GPU busy 7.74 → 7.25 ms per step). Residual add + norm alone: one row takes 18.2 µs in PyTorch and 2.1 µs in Triton; 4,096 rows run at 97% of the measured 423 GB/s. Greedy rows identical to the PyTorch norm: 1/8; teacher-forced argmax agreement 99.28%.
+
+_Heat (busy SM clock median, peak GPU temperature, throttle reasons): tl-rmsnorm: 1,620 MHz (min 1,440), 85 °C, sw_power_cap + sw_thermal_slowdown._
 
 ### Serving: static vs continuous batching, with and without CUDA graphs
 

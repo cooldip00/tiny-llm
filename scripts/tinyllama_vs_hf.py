@@ -20,6 +20,7 @@ from transformers import LlamaForCausalLM
 from tinyllm.generate import generate
 from tinyllm.hf_llama import TINYLLAMA, TINYLLAMA_REV, HFTokenizer, download, load_from_dir
 from tinyllm.logit_compare import first_divergence, hf_stepwise, logit_stats, ours_stepwise
+from tinyllm.model import norm_backend
 from tinyllm.provenance import Provenance, claim_output
 
 CHAT = [
@@ -55,7 +56,7 @@ def main() -> None:
     prompts = [torch.tensor([x], device="cuda") for x in prompts]
     gen = dict(max_new_tokens=N, do_sample=False, temperature=None, top_p=None, top_k=None)
     prov = Provenance(weights="ref fp32 / HF bf16 / ours bf16", script="tinyllama_vs_hf",
-                      model=f"{TINYLLAMA}@{TINYLLAMA_REV[:7]}").start()
+                      model=f"{TINYLLAMA}@{TINYLLAMA_REV[:7]}", norm_backend=norm_backend()).start()
 
     # 1. fp32 reference: greedy continuation (the shared sequence) and its full-forward logits.
     hf = hf_model(path, torch.float32, "eager")

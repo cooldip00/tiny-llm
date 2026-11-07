@@ -473,8 +473,43 @@ Decode tok/s (% of ceiling):
 - **Known gap:** int8 TTFT is 10–130 ms above bf16 (batch 1 to 32), because prefill uses the PyTorch cast path. A Triton GEMM for prefill is out of scope (Triton is capped at one day, D-016).
 - **Why it gains less at batch 32:** the matmuls are 5.7 of bf16's 7.8 ms step at batch 1 (73%) but 6.7 of 15.6 ms at batch 32 (43%); the rest is attention over the KV cache and the other ops. At batch 1 the step saves 2.4 ms, close to the 2.6 ms the matmul bench predicts. At batch 32 it saves 0.9 ms of a predicted 3.0 ms; that gap is not explained yet.
 
+### 4.10a Fused RMSNorm + residual add (2026-11-07)
+- **What:** `src/tinyllm/kernels/rmsnorm.py`, two Triton kernels, one program per row:
+  - `rmsnorm(x, w, eps)`: the norm in one pass (statistics in fp32), instead of PyTorch's ~7 kernels (cast, square, mean, add, rsqrt, multiply, cast back, weight multiply).
+  - `add_rmsnorm(x, a, w, eps)`: the residual add `h = x + a` and the next norm in one kernel; returns both. `Block.forward` now calls `post_attention_layernorm.add_forward(x, attn)`; the input norm and the final norm use `rmsnorm`.
+  - Rounding follows `model.RMSNorm` step by step, and `h` is bitwise equal to `x + a`. Only the order of the fp32 sum differs, so in half dtypes the output can be 1–2 ulps off (tests allow 3 ulps and require > 99% of elements bitwise equal).
+  - `RMSNorm(backend="torch"|"triton")`, `set_norm_backend(model, b)`. The Triton path runs only on CUDA with no gradient needed; training, CPU and a missing Triton use the PyTorch code. A captured CUDA graph keeps the kernels it saw, so switching backends means recapturing.
+  - Tests (`tests/test_rmsnorm.py`): widths 64–5,632, rows 1–4,096, bf16 / fp16 / fp32 and mixed dtypes, strided inputs, CUDA-graph replay, autograd fallback, greedy tokens of a small model on both backends, and that `Block`'s restructured forward is exactly the old one on the PyTorch backend.
+- **Session** (`bench_all --only tl-rmsnorm`, `scripts/bench_rmsnorm.py`, commit `891814c`, NitroSense performance, fans Max, room fan overhead; JSON `runs/bench/v1/tinyllama/rmsnorm_graph.json`, log `runs/bench/4.10a/`):
+  - **End to end** (TinyLlama, KV cache + CUDA graphs, P=128, 256 new tokens, the two norms alternating at each batch size, median of 3 rounds):
+
+    | Batch | PyTorch norm tok/s | Triton norm tok/s | Triton vs PyTorch | ms per step |
+    |---|---|---|---|---|
+    | 1 | 128 | 137 | **1.07×** | 7.83 → 7.30 |
+    | 8 | 844 | 897 | **1.06×** | 9.48 → 8.92 |
+    | 32 | 2,073 | 2,162 | **1.04×** | 15.44 → 14.80 |
+
+    TTFT also drops slightly (batch 1: 30.6 → 27.4 ms).
+  - **Profile, one graph decode step at batch 1:** 1,164 → 827 GPU ops (−337); GPU busy 7.74 → 7.25 ms per step, both at 1,875 MHz. The 0.49 ms saved matches the 0.53 ms step-time gain.
+  - **The kernels alone** (width 2,048, bf16, 20 calls per captured graph):
+
+    | Op | Rows | PyTorch µs | Triton µs | Speedup | Triton % of 423 GB/s |
+    |---|---|---|---|---|---|
+    | norm | 1 | 16.2 | 2.0 | 8.0× | (in L2) |
+    | add+norm | 1 | 18.2 | 2.1 | 8.7× | (in L2) |
+    | norm | 32 | 15.4 | 1.8 | 8.8× | (in L2) |
+    | add+norm | 32 | 16.7 | 1.8 | 9.1× | (in L2) |
+    | norm | 4,096 | 748 | 82 | 9.1× | 96% |
+    | add+norm | 4,096 | 872 | 164 | 5.3× | 97% |
+
+    At decode sizes a row is 4 KB and sits in L2, so those times are a fixed per-call cost, not bandwidth. At 4,096 rows both kernels run at the measured bandwidth.
+  - **Correctness in the model:** greedy rows identical to the PyTorch norm 1/8 over 256 tokens (bf16 near-ties flip and then the texts diverge); teacher-forced argmax agreement 99.28%, max logit gap 0.34 at max |logit| 30.1.
+  - _Heat: busy SM clock median 1,620 MHz (min 1,440), 85 °C, sw_power_cap + sw_thermal_slowdown; no hardware slowdown._
+- **Why only 4–7%:** fusing the 45 norms (2 per layer × 22, plus the final one) saves about 0.5 ms of a 7.8 ms step at batch 1; most of the step is the weight reads (matmuls) and attention. The gain is in launch count and fixed per-kernel cost, so it shrinks as the batch grows.
+- **Default switched (D-032):** `"triton"` is the default backend since 2026-11-07, because vLLM and llama.cpp both fuse their norms. All GPU tables are rerun in one session before 6.5b, so no table mixes the two norms; this ablation stays as the record of what the kernel alone is worth.
+
 ## Results: Triton kernels (fill in)
 | Kernel | Shape | PyTorch time | Triton time | Achieved GB/s | % of peak | End-to-end tok/s Δ |
 |---|---|---|---|---|---|---|
-| Fused RMSNorm + residual | | | | | | |
+| Fused RMSNorm + residual | TinyLlama width 2,048, bf16: 1 row (decode) / 4,096 rows (prefill) | 18.2 µs / 872 µs (add, then 7 norm ops) | 2.1 µs / 164 µs | — / 409 | — / 97% of 423 GB/s (1 row sits in L2: a fixed cost, not bandwidth) | 1.07× at batch 1 (128 → 137 tok/s, graphs); 1.04× at batch 32. Default since D-032 |
 | INT8 GEMV (decode) | 155 Linears of one TinyLlama decode step, 1 row | 16.66 ms (cast + matmul); bf16 5.67 ms | 3.04 ms | 342 | 81% of 423 GB/s | 1.45× bf16 at batch 1 (186 vs 128 tok/s, graphs); 3.7× the PyTorch int8 path |

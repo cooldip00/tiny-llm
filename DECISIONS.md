@@ -386,3 +386,54 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - Routing in the browser (the page reads each Space's `/stats`): no server-side canary or rollback, no central logs, and CORS.
   - A Cloudflare Worker as router: a second language and codebase.
   - Leaving it to v1.1: there is time before ~11-18.
+
+### D-032 — RMSNorm defaults to the Triton kernel; every GPU table rerun in one session before v1 · ACCEPTED (2026-11-07)
+- **Context:** 4.10a fused RMSNorm and residual add + RMSNorm into Triton kernels (`src/tinyllm/kernels/rmsnorm.py`). On TinyLlama with CUDA graphs, decode is 1.07× / 1.06× / 1.04× at batch 1 / 8 / 32 (128 → 137 tok/s at batch 1). The batch-1 step drops from 1,164 to 827 GPU ops; GPU busy time drops from 7.74 to 7.25 ms at the same 1,875 MHz clock. With the PyTorch norm, each norm runs about 7 small kernels. The 4.10a code shipped with `"torch"` as the default, so no existing number changed.
+- **Choice:**
+  - `RMSNorm(backend=None)` now takes `DEFAULT_NORM_BACKEND = "triton"`. The kernel runs only on CUDA with no gradient needed. Training, CPU and a missing Triton all fall back to the PyTorch code, so training and the CPU Space are unchanged. `set_norm_backend(model, "torch")` still switches back.
+  - Provenance: every bench script records `norm_backend` (`norm_backend()` in `tinyllm.model`: `"triton"`, `"torch"` or `"mixed"`, with `"torch"` reported when the kernel won't run). The server's `/stats` reports it per variant.
+  - **Before 6.5b, every GPU table is rerun in one fresh session** with `bench_all.py --run` into a new `runs/bench/v1b/`:
+    - The tables the default changes: tl-naive, tl-kv, tl-kv-graph, tl-serving, tl-int8, tl-int8-graph, tl-profile, tl-logits, 30m-naive, 30m-kv, 30m-kv-graph, 30m-serving, 30m-int8, 30m-profile.
+    - `--run` also reruns the three it doesn't change (tl-hf: the HF baseline; tl-int8-gemv: matmuls alone; tl-rmsnorm: the ablation, which measures both norms itself), because a fresh run directory renders only from its own JSONs. That's +25 min and keeps every table in one session.
+    - Plus the 4.8a load sweep against vLLM and llama.cpp, all three engines in the same session.
+    - About 115 min of benchmarks plus cool-downs (~2.5 h), plus the load sweep; fans on Max, one GPU job at a time.
+  - The ablation table (PyTorch vs Triton norm) stays in RESULTS.md and INFERENCE.md 4.10a.
+- **Why:**
+  - vLLM fuses the residual add with RMSNorm in its own kernel, and llama.cpp fuses its norms too. In the comparison table we were the only engine running unfused norms; the default now matches what the other two do.
+  - The repo's job is to show the best version of the engine. The expected gain at one stream is about 112 → 120 tok/s (58% → about 62% of the bandwidth ceiling), which narrows vLLM's lead from 1.44× to about 1.35×. That is an expectation, not a result, until the rerun.
+  - One session for all tables means no table mixes the two norms, and it also replaces the old heat-flagged runs (30m-serving, tl-int8-graph).
+- **Caveats:**
+  - The kernel computes the same function, but the fp32 sum runs in a different order, so bf16 outputs differ by rounding: 1 of 8 greedy rows identical to the PyTorch norm over 256 tokens; teacher-forced argmax agreement 99.28%. The tests compare against the reference with tolerances (3 ulps in half dtypes), not bitwise.
+  - Triton compiles each width and dtype on first use (about 1 s, then cached on disk). The benchmark warm-ups and the server's graph capture absorb it.
+  - Validation loss computed under `no_grad` on the GPU runs the Triton norm, so it can differ from the training-time value in about the 4th–5th decimal. The training step itself (gradients) uses PyTorch.
+  - The trained 30M checkpoint is not affected: the weights and the `state_dict` keys are unchanged (tested).
+  - Until the rerun, the committed v1 tables were measured with the PyTorch norm (`norm_backend` absent from their provenance).
+- **Rejected:**
+  - Keeping `"torch"` as the default and reporting the kernel only as an ablation: the headline comparison against vLLM and llama.cpp would compare our unfused engine with their fused ones.
+  - Switching the default without a rerun: tables would mix the two norms, and a reader couldn't tell which numbers include the kernel.
+  - Rerunning only the TinyLlama tables: the 30M tables would be on a different configuration from the TinyLlama ones for no saving that matters (~30 min).
+
+### D-033 — What v1 ships; the Docker image is CPU-only · ACCEPTED (2026-11-07)
+- **Context:** after D-032 the engine has three GPU-only speedups: GQA (in the model, used by TinyLlama), the Triton kernels and CUDA graphs. The live demo runs on a free CPU Space, where none of them apply. The question was which model and which features each v1 deliverable carries, and whether the 30M model should be retrained with GQA first.
+- **Choice:**
+
+  | What | Model | GQA | Triton | CUDA graphs |
+  |---|---|---|---|---|
+  | Live demo: HF free CPU Space (6.5b), then 2 replicas + router (D-031) | our 30M | no | no (CPU fallback) | no |
+  | HF model repo | 30M weights + model card | — | — | — |
+  | GitHub repo: source + Docker image | 30M and TinyLlama 1.1B | yes | yes | yes |
+
+  - **The Docker image for v1 is CPU-only**, the same image the Space runs. On a GPU machine, the source install (`uv sync`) runs every GPU path. A CUDA image goes to PARKING_LOT.
+  - **No retraining of the 30M model** for v1, neither for GQA nor for the norm.
+  - No paid GPU Space.
+- **Why:**
+  - The norm kernel computes the same function, so there's nothing to retrain for it.
+  - The 30M model is plain multi-head attention, and at 30M its KV cache is tiny, so GQA would save almost nothing there. GQA is already shown working on TinyLlama (4.9a), which is where it matters. A 30M GQA-vs-MHA training run is a research question for Phase 5, after v1 (D-021).
+  - A CPU image is small and builds in CI with no GPU. A CUDA image is 6–8 GB, needs `docker run --gpus` and the NVIDIA container toolkit to test, and adds about 1–2 h for something few visitors would run.
+- **Caveats:**
+  - The README must say plainly that the Space shows the serving stack on a small model on CPU, and that the speed numbers come from the laptop GPU (RTX 3070 Ti Laptop), not the Space.
+  - A visitor with a GPU who wants to try the fast paths uses the source install, not Docker.
+- **Rejected:**
+  - A CUDA image in v1: the size and the extra testing path aren't worth it before ~11-18.
+  - Retraining the 30M model with GQA before v1: about a day of GPU time for no visible change in the demo.
+  - A paid GPU Space: ongoing cost for a portfolio demo.

@@ -13,7 +13,7 @@ import torch
 
 from tinyllm.config import ModelConfig
 from tinyllm.generate import generate
-from tinyllm.model import Block, RMSNorm, Transformer, set_norm_backend
+from tinyllm.model import Block, RMSNorm, Transformer, norm_backend, set_norm_backend
 
 CUDA = torch.cuda.is_available()
 try:
@@ -159,25 +159,38 @@ def test_model_greedy_same_on_both_backends():
         if p.dim() == 2:
             p.mul_(4)
     model = model.cuda()
+    assert set_norm_backend(model, "torch") == 2 * CFG.n_layers + 1
+    assert norm_backend(model) == "torch"
     ids = torch.randint(0, CFG.vocab_size, (2, 10), generator=torch.Generator().manual_seed(1)).cuda()
     new = CFG.max_seq_len - ids.shape[1]
     want = generate(model, ids, new, temperature=0)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         ref = model(want)[0].float()
     assert set_norm_backend(model, "triton") == 2 * CFG.n_layers + 1
+    assert norm_backend(model) == "triton"
     with torch.autocast("cuda", dtype=torch.bfloat16):
         got = model(want)[0].float()
     assert (got - ref).abs().max() <= 0.02 * ref.abs().max()
     assert torch.equal(generate(model, ids, new, temperature=0), want)
     assert torch.equal(generate(model, ids, new, temperature=0, cuda_graph=True), want)
-    set_norm_backend(model, "torch")
 
 
 # ---------- CPU: backends and fallbacks (run in CI) ----------
 
+def test_default_backend_is_triton():
+    """D-032: the fused kernel is the default; it runs only where it can (CUDA, no gradient)."""
+    assert RMSNorm(8).backend == "triton"
+    model = Transformer(CFG)
+    assert {m.backend for m in model.modules() if isinstance(m, RMSNorm)} == {"triton"}
+    assert norm_backend(model) == "torch"                       # CPU weights: the PyTorch code runs
+    assert norm_backend() == ("triton" if CUDA and HAVE_TRITON else "torch")
+    model.norm.backend = "torch"
+    assert norm_backend(model) == "mixed"
+
+
 def test_cpu_falls_back_to_the_torch_path():
     torch.manual_seed(0)
-    a, b = RMSNorm(64), RMSNorm(64, backend="triton")
+    a, b = RMSNorm(64, backend="torch"), RMSNorm(64, backend="triton")
     x, r = torch.randn(3, 64), torch.randn(3, 64)
     assert torch.equal(a(x), b(x))
     ya, ha = a.add_forward(x, r)

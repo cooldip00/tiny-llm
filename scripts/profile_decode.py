@@ -28,7 +28,7 @@ from torch.profiler import ProfilerActivity, profile
 from tinyllm.config import ModelConfig
 from tinyllm.cuda_graph import GraphDecoder
 from tinyllm.kv_cache import KVCache
-from tinyllm.model import RotaryEmbedding, Transformer
+from tinyllm.model import RotaryEmbedding, Transformer, norm_backend
 from tinyllm.provenance import GpuMonitor, Provenance, claim_output
 from tinyllm.train import load_checkpoint
 
@@ -141,7 +141,8 @@ def main() -> None:
     print(f"{name}: {weight_bytes / 2**20:.0f} MiB bf16 weights, ceiling {ceiling:.0f} tok/s per row "
           f"| B={args.batch} ctx={args.ctx}")
 
-    prov = Provenance(weights="bf16 + bf16 autocast", script="profile_decode", model=name).start()
+    prov = Provenance(weights="bf16 + bf16 autocast", script="profile_decode", model=name,
+                      norm_backend=norm_backend(model)).start()
     rows = {}
     for mode, dec in [("eager", Eager(model)), ("graph", GraphDecoder(model, args.batch))]:
         r = measure(dec, prompt, args.steps, Path(args.out_dir) / f"{name}_B{args.batch}_{mode}.json")

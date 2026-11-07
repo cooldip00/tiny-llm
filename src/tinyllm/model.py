@@ -20,16 +20,18 @@ class RMSNorm(nn.Module):
     works just as well in LLMs. The statistic is computed in fp32 even under
     bf16, because a sum of squares loses precision in bf16.
 
-    Backend "triton" (step 4.10a) runs tinyllm.kernels.rmsnorm: one kernel instead of about seven,
-    and add_forward fuses the residual add before it. It is used only for CUDA inputs when no
-    gradient is needed (the kernel has no backward); otherwise this PyTorch code runs.
+    Backend "triton" (step 4.10a, the default since D-032) runs tinyllm.kernels.rmsnorm: one kernel
+    instead of about seven, and add_forward fuses the residual add before it. It is used only for
+    CUDA inputs when no gradient is needed (the kernel has no backward); otherwise, and on backend
+    "torch", this PyTorch code runs. So training and CPU inference are unchanged; GPU inference
+    differs from the PyTorch code only by bf16 rounding (docs/INFERENCE.md, 4.10a).
     """
 
-    def __init__(self, dim: int, eps: float = 1e-5, backend: str = "torch"):
+    def __init__(self, dim: int, eps: float = 1e-5, backend: str | None = None):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
-        self.backend = _check_norm_backend(backend)
+        self.backend = _check_norm_backend(DEFAULT_NORM_BACKEND if backend is None else backend)
 
     def _kernel(self, x: Tensor):
         if self.backend != "triton" or not x.is_cuda:
@@ -57,6 +59,7 @@ class RMSNorm(nn.Module):
 
 
 NORM_BACKENDS = ("torch", "triton")
+DEFAULT_NORM_BACKEND = "triton"   # D-032: the fused kernel by default; it steps aside for autograd and CPU
 
 
 def _check_norm_backend(backend: str) -> str:
@@ -86,6 +89,24 @@ def set_norm_backend(model: nn.Module, backend: str) -> int:
     for m in norms:
         m.backend = backend
     return len(norms)
+
+
+def norm_backend(model: nn.Module | None = None) -> str:
+    """The RMSNorm code `model` runs at inference here: "triton" only if its norms ask for it, its
+    weights are on CUDA and Triton imports; else "torch" ("mixed" if its norms disagree). With no
+    model: what a freshly built model on CUDA would run. Recorded in benchmark provenance (D-032)."""
+    if model is None:
+        kinds = {DEFAULT_NORM_BACKEND}
+        on_cuda = torch.cuda.is_available()
+    else:
+        kinds = {m.backend for m in model.modules() if isinstance(m, RMSNorm)}
+        p = next(model.parameters(), None)
+        on_cuda = p is not None and p.is_cuda
+    if len(kinds) > 1:
+        return "mixed"
+    if kinds == {"triton"} and on_cuda and _norm_kernel() is not None:
+        return "triton"
+    return "torch"
 
 
 class RotaryEmbedding(nn.Module):

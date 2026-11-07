@@ -129,7 +129,7 @@ def main() -> None:
           flush=True)
     batches = list(map(int, args.batch_sizes.split(",")))
     prov = Provenance(weights="bf16 (published)", script="bench_rmsnorm", model="tinyllama",
-                      engine="kv-graph", rounds=args.rounds).start()
+                      engine="kv-graph", rounds=args.rounds, norm_backend="both, per row").start()
 
     print("1. kernels alone (width 2048, bf16, CUDA-graph timed):")
     alone = kernels_alone(list(map(int, args.rows.split(","))), args.calls, args.iters, args.repeats)

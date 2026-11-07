@@ -49,6 +49,7 @@ import bench_generate  # noqa: E402
 from bench_generate import bench, kv_greedy, make_prompts, use_model, val_tokens  # noqa: E402
 
 from tinyllm.generate import generate
+from tinyllm.model import norm_backend
 from tinyllm.provenance import Provenance, claim_output
 from tinyllm.quant import quantize_model, set_backend, weight_bytes
 from tinyllm.train import TrainConfig, evaluate
@@ -199,7 +200,7 @@ def main() -> None:
     prov = Provenance(weights=("bf16 / int8 (per row), bf16 autocast" if tiny else
                                "fp32 + bf16 autocast / bf16 / int8 (per row)"), script="bench_quant",
                       rounds=args.rounds, model="tinyllama" if tiny else args.ckpt,
-                      engine=args.engine, triton=args.triton).start()
+                      engine=args.engine, triton=args.triton, norm_backend=norm_backend()).start()
     for r in range(args.rounds):
         for b in batches:
             for k, m in variants.items():

@@ -41,6 +41,7 @@ from tinyllm.cuda_graph import SlotGraphDecoder
 from tinyllm.engine import Request, run_continuous, run_static
 from tinyllm.generate import generate
 from tinyllm.kv_cache import SlotKVCache
+from tinyllm.model import norm_backend
 from tinyllm.provenance import GpuMonitor, Provenance, claim_output
 
 
@@ -126,7 +127,8 @@ def main() -> None:
 
     rows = []
     prov = Provenance(weights=f"{'bf16' if tiny else 'fp32'} + bf16 autocast", script="bench_serving",
-                      repeats=args.repeats, model="tinyllama" if tiny else str(args.ckpt)).start()
+                      repeats=args.repeats, model="tinyllama" if tiny else str(args.ckpt),
+                      norm_backend=norm_backend()).start()
     for name, size, fn, kw in runs:
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()

@@ -58,6 +58,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from tinyllm.engine import ContinuousEngine, Request, Sampling
+from tinyllm.model import norm_backend
 from tinyllm.obs import EngineSnapshot, Metrics, RequestRecord, hash_client, itl_stats, setup_logging
 
 log = logging.getLogger("tinyllm.server")
@@ -589,7 +590,8 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
     async def stats():
         out = metrics.stats()
         out["variants"] = {v.name: {"version": v.version, "outstanding": v.worker.outstanding(),
-                                    "n_slots": v.worker.engine.n_slots, "failed": v.worker.failed}
+                                    "n_slots": v.worker.engine.n_slots, "failed": v.worker.failed,
+                                    "norm_backend": norm_backend(v.worker.engine.model)}
                            for v in variants}
         return out
 

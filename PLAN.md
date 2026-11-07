@@ -121,7 +121,12 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
     - Baseline first: rerun `scripts/bench_all.py --only tl-int8 --power-mode performance` once the GPU is cool (the v1 tl-int8 run was thermally throttled).
     - `bench_quant.py` gains a CUDA-graph mode; bf16 and int8 are both measured with graphs on (without them, batch-1 decode is bound by kernel launches and hides the kernel).
     - **Stop rule:** if int8 doesn't beat bf16 at batch 1 with graphs on within the half day, stop, record the numbers in PROGRESS, and leave the README's INT8 explanation as it is.
-  - [ ] 4.10a Fused RMSNorm + residual add, after 4.10b (~1–1.5 h); Triton capped at one day in total (D-016 amendment, 2026-11-07)
+  - [x] 4.10a Fused RMSNorm + residual add, after 4.10b (~1–1.5 h); Triton capped at one day in total (D-016 amendment, 2026-11-07) _Done 2026-11-07: two Triton kernels (norm; residual add + norm), h bitwise equal to x + a, output within 3 ulps; with CUDA graphs, TinyLlama decode 1.07× / 1.06× / 1.04× at B=1 / 8 / 32; batch-1 step 1,164 → 827 GPU ops; add+norm alone 8.7× at 1 row, 97% of 423 GB/s at 4,096 rows. Made the default backend (D-032); every GPU table is rerun before 6.5b (4.10c). See docs/INFERENCE.md 4.10a._
+  - [ ] 4.10c **Rerun every GPU table in one session on the new default (D-032), before 6.5b** (~115 min of benchmarks plus cool-downs, ~2.5 h, plus the load sweep). Ask before starting; fans on Max; one GPU job at a time.
+    - Back up `runs/bench` first. `bench_all.py --run --dir runs/bench/v1b --power-mode performance-fans-max-room-fan-overhead` (a fresh directory: nothing in `v1/` is overwritten). All 17 entries; tl-hf, tl-int8-gemv and tl-rmsnorm don't depend on the default but are rerun so every table comes from one session.
+    - The 4.8a load sweep, ours vs vLLM vs llama.cpp, in the same session, one engine on the GPU at a time.
+    - Check every JSON's provenance says `norm_backend: triton` and every heat line before quoting. Re-render RESULTS.md and the README from `v1b`; move the `--dir` default (`bench_all.py`, `results.render_results`) to `v1b`, and correct the README's "~1.5–2 h" for a full run (now ~115 min plus cool-downs); show the diff, commit.
+    - Expected (not a result): one stream ~112 → ~120 tok/s, vLLM's lead 1.44× → ~1.35×.
   - For each kernel: `allclose` against the PyTorch reference, achieved GB/s as a % of the measured peak, and end-to-end tok/s delta in the engine
   - Stop after these two. Further kernels go to PARKING_LOT.md
 
@@ -153,6 +158,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [ ] 6.5 Publish (added by D-021), in this order:
   - [x] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1). Plots added 2026-11-06 (6.2); pinned 2026-11-07._
   - [ ] 6.5b Hugging Face: our model with a model card, plus a small Gradio Space demo
+    - _D-033 (2026-11-07):_ after 4.10c. The Space and the Docker image run our 30M model on CPU (no GQA, Triton or CUDA graphs there: the CPU fallbacks); the image is **CPU-only** (a CUDA image is in PARKING_LOT). The README says the speed numbers come from the laptop GPU, not the Space. No 30M retrain for v1.
     - _D-028 (2026-11-06; design in [docs/SERVING.md](docs/SERVING.md)), about +2–3 h:_
       - The Space runs our FastAPI server (same code as 4.13) with the demo page mounted on it. The 30M model is framed as story continuation (a TinyStories base model), with example openings.
       - A status page with live charts from `/stats` (requests / min, latency, queue depth).
@@ -285,7 +291,7 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-04 → 11-05 | 4.12 benchmark provenance; 4.9a `gqa`; 4.9b load TinyLlama; 4.9c logits match HF |
 | 2026-11-06 → 11-08 | 4.11 CUDA graphs on decode; 4.9d TinyLlama benchmarks vs the ceiling; vLLM + llama.cpp install spike |
 | 2026-11-09 → 11-11 | 6.7 CI; first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
-| 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; 4.10b then 4.10a Triton before 6.3 (D-016 amendments); replicas + router Space after 6.5b's single Space (D-031); rest of Phase 6 → **v1** |
+| 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; 4.10b then 4.10a Triton before 6.3 (D-016 amendments); 4.10c rerun of every GPU table on the Triton norm (D-032) before 6.5b; replicas + router Space after 6.5b's single Space (D-031); rest of Phase 6 → **v1** |
 | If ahead | 4.7 prompt-lookup decoding |
 | 2026-11-19 → 11-21 | 6.9 release strategies (D-028) → **v1.1** |
 | After v1 | Phase 5, Phase 7 |
