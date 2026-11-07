@@ -19,10 +19,18 @@ Step 4.9d: --model tinyllama. Variants bf16 (the published weights, so the basel
 fp32 copy (4.4 GB) beside them does not fit in 8 GB. The "exact" reference is the bf16 model
 without autocast. Val loss is on the validation text re-tokenized with TinyLlama's tokenizer, 8
 sequences x 512 tokens per batch (4x the batches, same token count), teacher-forced on 8 sequences.
+
+Step 4.10b: --triton adds variant int8-triton, the same int8 tensors (shared, not copied) through
+the Triton kernel (tinyllm.kernels.int8_gemv) at decode. Its prefill and the val-loss /
+teacher-forced passes are prefill-sized, so they take the torch path and match int8 by
+construction; the decode-path check is its greedy rows. --engine kv-graph times every variant with
+CUDA graphs (the D-016 judge). Default output names carry both: int8_graph_triton.json etc.
+Without the flags, the run and its output name are as before.
 """
 
 import argparse
 import copy
+import itertools
 import json
 import statistics
 import sys
@@ -36,7 +44,7 @@ from bench_generate import bench, kv_greedy, make_prompts, use_model, val_tokens
 
 from tinyllm.generate import generate
 from tinyllm.provenance import Provenance, claim_output
-from tinyllm.quant import quantize_model, weight_bytes
+from tinyllm.quant import quantize_model, set_backend, weight_bytes
 from tinyllm.train import TrainConfig, evaluate
 
 MiB = 2**20
@@ -62,6 +70,23 @@ def teacher_forced(variants, ref, seq, prompt_len):
     return out
 
 
+def default_out(tiny: bool, engine: str, triton: bool) -> str:
+    """runs/bench[/tinyllama]/int8[_graph][_triton].json: each mode its own file (6.8)."""
+    tag = ("_graph" if engine == "kv-graph" else "") + ("_triton" if triton else "")
+    return f"runs/bench/{'tinyllama/' if tiny else ''}int8{tag}.json"
+
+
+def shared_copy(model, backend: str):
+    """A second module tree over the same tensors (no weight copy), with its Int8Linear backend
+    switched. A separate object, so bench_generate's per-model GraphDecoder cache can't mix them."""
+    memo = {id(t): t for t in itertools.chain(model.parameters(), model.buffers())}
+    twin = copy.deepcopy(model, memo)
+    set_backend(twin, backend)
+    assert all(a is b for a, b in zip(model.buffers(), twin.buffers()))
+    assert all(a is b for a, b in zip(model.parameters(), twin.parameters()))
+    return twin
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", default="checkpoints/main/best.pt")
@@ -71,14 +96,20 @@ def main() -> None:
     p.add_argument("--rounds", type=int, default=3)
     p.add_argument("--eval-batches", type=int, default=20)
     p.add_argument("--model", default=None, help="'tinyllama' instead of --ckpt (4.9d)")
-    p.add_argument("--out", default=None, help="default: runs/bench/int8.json, runs/bench/tinyllama/int8.json")
+    p.add_argument("--engine", default="kv", choices=("kv", "kv-graph"), help="timed engine (4.10b)")
+    p.add_argument("--triton", action="store_true", help="add variant int8-triton (4.10b)")
+    p.add_argument("--out", default=None, help="default: runs/bench[/tinyllama]/int8[_graph][_triton].json")
     p.add_argument("--overwrite", action="store_true", help="replace an existing --out (6.8)")
     args = p.parse_args()
     tiny = args.model == "tinyllama"
     if args.model not in (None, "tinyllama"):
         p.error("--model takes 'tinyllama'; use --ckpt for a checkpoint")
-    out = claim_output(args.out or ("runs/bench/tinyllama/int8.json" if tiny else "runs/bench/int8.json"),
-                       args.overwrite)
+    if args.triton:
+        try:
+            from tinyllm.kernels import int8_gemv
+        except ImportError as e:
+            p.error(f"--triton needs Triton: {e}")
+    out = claim_output(args.out or default_out(tiny, args.engine, args.triton), args.overwrite)
     dev = "cuda"
 
     if tiny:
@@ -92,17 +123,21 @@ def main() -> None:
         int8 = copy.deepcopy(fp32)
         n_q = quantize_model(int8)
         variants, base = {"fp32": fp32, "bf16": bf16, "int8": int8}, "fp32"
-    print(f"{torch.cuda.get_device_name()} | torch {torch.__version__} | {n_q} Linear layers -> Int8Linear")
+    if args.triton:
+        variants["int8-triton"] = shared_copy(int8, "triton")
+    print(f"{torch.cuda.get_device_name()} | torch {torch.__version__} | {n_q} Linear layers -> Int8Linear | "
+          f"engine {args.engine} | variants {', '.join(variants)}")
 
     sizes = {k: {kind: b / MiB for kind, b in weight_bytes(m).items()} for k, m in variants.items()}
     for k, s in sizes.items():
-        print(f"{k:>4} stored weights: matmul {s['matmul']:6.1f} MiB | embedding {s['embedding']:5.1f} MiB | "
+        print(f"{k:>11} stored weights: matmul {s['matmul']:6.1f} MiB | embedding {s['embedding']:5.1f} MiB | "
               f"other {s['other']:.2f} MiB")
 
-    # Correctness gate: the timed loop on the int8 model reproduces generate(temperature=0).
+    # Correctness gate: the timed loop on each int8 model reproduces generate(temperature=0).
     check = make_prompts(2, 32, dev)
-    assert torch.equal(kv_greedy(int8, check, 64)[0], generate(int8, check, 64, temperature=0))
-    print("check: int8 timed kv loop == generate(temperature=0): OK")
+    for k in (k for k in variants if k.startswith("int8")):
+        assert torch.equal(kv_greedy(variants[k], check, 64)[0], generate(variants[k], check, 64, temperature=0))
+        print(f"check: {k} timed kv loop == generate(temperature=0): OK")
 
     val = val_tokens()
     cfg = (TrainConfig(eval_batches=4 * args.eval_batches, micro_batch=8) if tiny    # same tokens, fits 8 GB
@@ -122,18 +157,19 @@ def main() -> None:
     for k in variants:
         t = tf[k]
         gap = "-" if t["max_gap_at_flip"] is None else f"{t['max_gap_at_flip']:.3f}"
-        print(f"  {k:>4}: argmax agree {t['argmax_agree']:.2%} | KL {t['kl_mean']:.2e} nats | "
+        print(f"  {k:>11}: argmax agree {t['argmax_agree']:.2%} | KL {t['kl_mean']:.2e} nats | "
               f"largest margin at a flip {gap} | greedy rows identical to {base}-autocast {same[k]}/{n_seq}")
 
     batches = list(map(int, args.batch_sizes.split(",")))
     runs = {k: {b: [] for b in batches} for k in variants}
     prov = Provenance(weights=("bf16 / int8 (per row), bf16 autocast" if tiny else
                                "fp32 + bf16 autocast / bf16 / int8 (per row)"), script="bench_quant",
-                      rounds=args.rounds, model="tinyllama" if tiny else args.ckpt).start()
+                      rounds=args.rounds, model="tinyllama" if tiny else args.ckpt,
+                      engine=args.engine, triton=args.triton).start()
     for r in range(args.rounds):
         for b in batches:
             for k, m in variants.items():
-                runs[k][b].append(bench(m, "kv", b, args.prompt_len, args.new_tokens, 3, 5, dev))
+                runs[k][b].append(bench(m, args.engine, b, args.prompt_len, args.new_tokens, 3, 5, dev))
         print(f"round {r + 1}/{args.rounds}: " + " | ".join(
             f"B={b} " + "/".join(f"{runs[k][b][-1]['decode_tok_s']:.0f}" for k in variants) for b in batches)
             + f"  ({'/'.join(variants)} decode tok/s)", flush=True)
@@ -146,14 +182,16 @@ def main() -> None:
             med = rs[len(rs) // 2]
             rows.append({"variant": k, **med, "decode_tok_s_rounds": [x["decode_tok_s"] for x in runs[k][b]]})
             ref = next(x for x in rows if x["variant"] == base and x["batch"] == b)
-            print(f"B={b:>2} {k:>4} | decode {med['decode_tok_s']:7.0f} tok/s ({med['ms_per_step']:.2f} ms/step, "
+            print(f"B={b:>2} {k:>11} | decode {med['decode_tok_s']:7.0f} tok/s ({med['ms_per_step']:.2f} ms/step, "
                   f"{med['decode_tok_s'] / ref['decode_tok_s']:.2f}x {base}, "
                   f"{med['pct_of_ceiling']:.1f}% of its ceiling) | TTFT {med['ttft_ms']:.2f} ms | "
                   f"rounds {[round(x) for x in rows[-1]['decode_tok_s_rounds']]}")
 
+    extra = {"triton_configs": int8_gemv.best_configs()} if args.triton else {}
     out.write_text(json.dumps({"model": "tinyllama" if tiny else args.ckpt, "baseline": base, "gpu": torch.cuda.get_device_name(), "torch": torch.__version__,
-                               "provenance": provenance, "weights_mib": sizes, "val_loss": losses, "eval_batches": args.eval_batches,
-                               "teacher_forced": tf, "greedy_rows_identical": same, "rows": rows}, indent=2))
+                               "engine": args.engine, "provenance": provenance, "weights_mib": sizes, "val_loss": losses,
+                               "eval_batches": args.eval_batches, "teacher_forced": tf, "greedy_rows_identical": same,
+                               "rows": rows, **extra}, indent=2))
     print(f"wrote {out}")
 
 
