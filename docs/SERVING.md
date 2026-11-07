@@ -19,6 +19,8 @@ This is a plan, not a record of what is built. PLAN.md ticks each part when it l
 - The server takes `--model tinyllama` or `--ckpt <path>`, so it's one codebase for both.
 - The 30M model is a **base model trained only on TinyStories**, with no instruction tuning or RLHF. It continues stories and does not answer questions or follow instructions, so the API is `/v1/completions` (text in, continuation out), not chat. TinyLlama is chat-tuned: clients put its chat template into the prompt. The demo presents the 30M model as story continuation, with example openings.
 - The laptop is never exposed through a tunnel. The Space is the public endpoint.
+- **Deploying the Space (6.5b step 5):** `scripts/push_space.py` (dry run by default; `--yes` to act). `--create` makes the public Docker Space on cpu-basic with the variable `LOG_DATASET`; the secrets `HF_TOKEN` (write access to the log dataset only) and `TINYLLM_LOG_SALT` are added by hand in its settings. A push uploads, in one Space commit, an allow-list read from git at HEAD: Dockerfile, `.dockerignore`, `src/tinyllm/`, the tokenizer, LICENSE, and `space/README.md` as the Space's README (settings header + page). It refuses uncommitted tracked changes and a HEAD that isn't on GitHub, writes the commit into the uploaded Dockerfile's `ARG GIT_COMMIT` (code and label in one commit; a Space variable would restart the old code under the new label), deletes Space files no longer in the list, and records the push in `runs/space/push_<time>.json`.
+- **CPU threads in a container (6.5b step 5):** torch sizes its thread pool from the host's cores and ignores the container's CPU quota. Under `docker run --cpus 2` on the 16-core laptop it started 8 threads: decode ran ~5× slower (ITL p50 105 vs 21 ms) and the SLOs failed even at 0.5 req/s (`runs/bench/load/space-cpu/probe-threads-*`). On CPU the server now sets torch's threads to the container's limit (`cpu_limit()`: cgroup `cpu.max`, cgroup v1, then HF's `CPU_CORES`), never above torch's own choice; `--threads N` overrides it, and `model loaded` logs the number.
 
 ## 4.13 step 2: the server
 
@@ -71,7 +73,8 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
 ### Privacy rules
 
 - We log metadata only (timings, token counts, status, finish reason, error message), **never prompt or completion text**. Error messages name the field and the limit, never the input (`tests/test_logs.py` sends a marker string through every path: 200, stream, 400 validation, 400 too long, 429, 504 and a client disconnect, and checks it never reaches the shipped files).
-- Visitors are identified by a salted hash of the IP (`TINYLLM_LOG_SALT`, a Space secret). Raw IPs are never stored. The salt must stay secret: there are few enough IPv4 addresses to try them all against a known salt. With the salt set, a visitor hashes the same across restarts, so visitors can be counted over days; without it, the salt is random per start.
+- Visitors are identified by a salted hash of the IP (`TINYLLM_LOG_SALT`, a Space secret). Raw IPs are never stored. The salt must stay secret: there are few enough IPv4 addresses to try them all against a known salt. With the salt set, a visitor hashes the same across restarts, so visitors can be counted over days. Salt order (`resolve_salt`): `TINYLLM_LOG_SALT` (set the same value in every replica Space, D-031); else a hash of HF's `SPACE_SIGNING_SECRET` (stable across restarts, but different in each Space); else random per start. `server ready` logs which one was used, never the salt.
+- The IP comes from `X-Forwarded-For` only with `--trust-proxy`, which the image turns on only on a Space (`SPACE_ID` set). The address is taken `--proxy-hops` entries from the **right** (default 1, the one HF's proxy appended), never the leftmost, which the client can set to dodge the rate limit (`tests/test_server.py`).
 - The hash is pseudonymous, not anonymous: it tells repeat visits apart. The log dataset is private and kept 30 days.
 - The demo page states what is logged ("What is logged" in its footer).
 
@@ -83,6 +86,31 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
   - throughput against request rate
   - **goodput**: the highest rate that still meets the latency target
   - behaviour past capacity (429s, queue wait)
+
+### Results: Space defaults on 2 CPUs (6.5b step 5, 2026-11-07)
+
+The 30M model in the Space image, `docker run --cpus 2 --memory 6g` on the laptop (HF's free CPU basic is 2 vCPU), Performance mode. `load_test.py --slo space --max-tokens 128`, 60 s per rate; torch at 2 threads in every run (see "CPU threads in a container"). Files: `runs/bench/load/space-cpu/pass{1,2}-*.{json,log,server.jsonl}`.
+
+Pass 1, queue 32: how many slots.
+
+| Slots | Rated load | TTFT p95 there | At the next rate up |
+|---|---|---|---|
+| 2 | 0.5 req/s | 553 ms | 1 req/s: p95 4.6 s |
+| 4 | 1.0 req/s | 187 ms | 2 req/s: p95 9.3 s |
+| 8 | 2.0 req/s | 500 ms | 4 req/s: p95 16.7 s, 68 of 238 shed |
+
+Pass 2, 8 slots: how long a queue.
+
+| Queue | 2 req/s | 3 req/s | 4 req/s |
+|---|---|---|---|
+| 4 | p95 332 ms, 0 shed | p95 1.20 s, 13 of 181 shed (7%), 2.71 req/s served | p95 1.45 s, 49 of 241 shed, 3.03 req/s, 388 tok/s |
+| 8 | p95 532 ms, 0 shed | p95 2.08 s (miss), 1 shed | p95 2.52 s (miss), 41 shed |
+
+- **Chosen: `SLOTS=8`, `MAX_QUEUE=4`** (≈ 2 s target × ~2–3 req/s). Rated load **2.0 req/s** (~235 tok/s) with no 429s. Above it the queue of 4 keeps TTFT p95 under 1.5 s and turns the rest away with fast 429s, which is the intended behaviour above rated load (SLOs, below). A queue of 32 made admitted requests wait ~15 s; a queue of 8 already misses the target at 3 req/s.
+- With queue 32 the measured throughput (2.16 req/s at 8 slots) is understated: the run's wall time includes draining the long queue. With queue 4 the same server served 3.0 req/s.
+- 4 → 8 slots: decode stays smooth (ITL p50 15–18 ms, p99 ≤ 40 ms with queue 4).
+- **Rate limit: 20 requests/min per visitor, burst 5.** One visitor can't hold more than ~1/6 of the rated load; a person clicking "generate" never hits it.
+- **Caveat:** the laptop's cores are likely faster than HF's shared vCPUs. 6.5b step 5 item 6 reruns a gentle load test on the live Space.
 
 ### Results: TinyLlama on three engines, rerun (4.10c, 2026-11-07)
 

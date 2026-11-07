@@ -272,8 +272,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--keep-requests", action="store_true", help="store every request in the JSON")
     ap.add_argument("--out", type=Path, default=None, help="default: runs/bench/load/<label>.json")
     args = ap.parse_args(argv)
+    path = args.out or Path("runs/bench/load") / f"{args.label}.json"
+    if path.exists():                                         # checked before the run, not after it
+        ap.error(f"{path} exists: results are never overwritten; pick another --label or --out")
 
-    from tinyllm.provenance import Provenance                 # imports torch: keep it out of the client path
+    from tinyllm.provenance import Provenance                # imports torch: keep it out of the client path
     prov = Provenance(power_mode=args.power_mode, url=args.url).start()
     out = asyncio.run(run(args))
     if not args.sequential:
@@ -284,7 +287,6 @@ def main(argv: list[str] | None = None) -> None:
               "slo": {"ttft_p95_s": SLO_TTFT_P95_S[args.slo], "availability": SLO_AVAILABILITY,
                       "shed_max": SLO_SHED_MAX},
               "provenance": prov.finish(), **out}
-    path = args.out or Path("runs/bench/load") / f"{args.label}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2))
     print(f"wrote {path}")

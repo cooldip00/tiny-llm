@@ -67,6 +67,14 @@ def test_load_test_against_our_server(model, tmp_path):
     assert req["status"] == 200 and req["tokens"] == 8 and len(req["itl_s"]) >= 1
 
 
+def test_existing_output_is_never_overwritten(tmp_path):
+    out = tmp_path / "load.json"
+    out.write_text("earlier result")
+    with pytest.raises(SystemExit):                          # before any request: no server needed
+        main(["--url", "http://127.0.0.1:9", "--power-mode", "test", "--out", str(out)])
+    assert out.read_text() == "earlier result"
+
+
 def test_sequential_summary_excludes_prefill():
     # 11 tokens: first at 0.5 s (prefill), last at 1.5 s -> 10 decode tokens in 1 s
     rs = [Result(0.0, 200, ttft_s=0.5, latency_s=1.5, tokens=11, itl_s=[0.1] * 10),

@@ -20,7 +20,7 @@ from tinyllm.engine import ContinuousEngine
 from tinyllm.generate import generate
 from tinyllm.model import Transformer
 from tinyllm.obs import Metrics
-from tinyllm.server import EngineWorker, Faults, ServerConfig, Variant, create_app
+from tinyllm.server import EngineWorker, Faults, ServerConfig, Variant, cpu_limit, create_app, forwarded_ip, resolve_salt
 
 CFG = ModelConfig(vocab_size=128, max_seq_len=48, d_model=64, n_layers=3, n_heads=4, ffn_hidden=160)
 PROMPT = [5, 17, 99, 3, 42, 8]
@@ -223,6 +223,57 @@ def test_rate_limit_per_client(model):
         assert codes[2].headers["retry-after"] == "1" and codes[2].json()["error"]["type"] == "rate_limit_error"
         stats = s.client.get("/stats").json()["windows"]["5m"]
         assert stats["requests"] == 3 and stats["reject_rate"] == pytest.approx(1 / 3, abs=1e-4)
+
+
+def test_forwarded_ip_ignores_what_the_client_sent():
+    assert forwarded_ip("1.1.1.1") == "1.1.1.1"
+    assert forwarded_ip("6.6.6.6, 1.1.1.1") == "1.1.1.1"                  # spoofed entry on the left
+    assert forwarded_ip("6.6.6.6, 1.1.1.1, 10.0.0.2", hops=2) == "1.1.1.1"
+    assert forwarded_ip("1.1.1.1", hops=2) == "1.1.1.1"                  # fewer entries than hops
+    assert forwarded_ip(" , ") is None
+
+
+def test_spoofed_forwarded_for_cannot_dodge_the_rate_limit(model):
+    with serve(model, rate_per_min=60, rate_burst=2, trust_proxy=True) as s:
+        def post(xff):
+            return s.client.post("/v1/completions", json=greedy(max_tokens=2),
+                                 headers={"x-forwarded-for": xff}).status_code
+        # one visitor (1.1.1.1, appended by the proxy) faking a new address each time
+        assert [post(f"6.6.6.{i}, 1.1.1.1") for i in range(3)] == [200, 200, 429]
+        assert post("2.2.2.2") == 200                                    # another visitor has its own bucket
+
+
+def test_cpu_limit(tmp_path, monkeypatch):
+    monkeypatch.delenv("CPU_CORES", raising=False)
+    assert cpu_limit(str(tmp_path)) is None                              # nothing known: torch decides
+    (tmp_path / "cpu.max").write_text("200000 100000\n")                 # docker run --cpus 2 (cgroup v2)
+    assert cpu_limit(str(tmp_path)) == 2
+    (tmp_path / "cpu.max").write_text("150000 100000\n")                 # --cpus 1.5 → 2 threads
+    assert cpu_limit(str(tmp_path)) == 2
+    (tmp_path / "cpu.max").write_text("max 100000\n")                    # no cap: fall through
+    (tmp_path / "cpu").mkdir()
+    (tmp_path / "cpu" / "cpu.cfs_quota_us").write_text("-1\n")           # cgroup v1, no cap either
+    (tmp_path / "cpu" / "cpu.cfs_period_us").write_text("100000\n")
+    assert cpu_limit(str(tmp_path)) is None
+    monkeypatch.setenv("CPU_CORES", "2")                                 # HF's variable
+    assert cpu_limit(str(tmp_path)) == 2
+    (tmp_path / "cpu" / "cpu.cfs_quota_us").write_text("400000\n")       # a v1 cap beats CPU_CORES
+    assert cpu_limit(str(tmp_path)) == 4
+    monkeypatch.setenv("CPU_CORES", "lots")
+    assert cpu_limit(str(tmp_path / "missing")) is None
+
+
+def test_salt_sources(monkeypatch):
+    for k in ("TINYLLM_LOG_SALT", "SPACE_SIGNING_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    a, b = resolve_salt(), resolve_salt()
+    assert a[1] == b[1] == "random" and a[0] != b[0]
+    monkeypatch.setenv("SPACE_SIGNING_SECRET", "hf-secret")
+    salt, src = resolve_salt()
+    assert src == "SPACE_SIGNING_SECRET" and salt == resolve_salt()[0] and "hf-secret" not in salt
+    monkeypatch.setenv("TINYLLM_LOG_SALT", "mine")
+    assert resolve_salt() == ("mine", "TINYLLM_LOG_SALT")                # the user's salt wins
+    assert resolve_salt("explicit") == ("explicit", "config")
 
 
 def test_timeout_is_504_and_frees_the_slot(model):

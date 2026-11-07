@@ -35,15 +35,24 @@ ARG GIT_COMMIT=unknown
 # REVISION pins the Hub commit of the model upload (scripts/upload_model.py), so a rebuild serves the same weights.
 ENV TINYLLM_GIT_COMMIT=$GIT_COMMIT \
     MODEL=CoolDip00/tiny-llm-tinystories-30m REVISION=b11100b189f9d5085ce8c0fd775ca71a6eaf287c \
-    SLOTS=4 PORT=7860 SLO_TTFT_S=2 LOG_DATASET=""
+    SLOTS=8 PORT=7860 SLO_TTFT_S=2 LOG_DATASET="" \
+    MAX_QUEUE=4 RATE_LIMIT=20 RATE_BURST=5 PROXY_HOPS=1
 
 EXPOSE 7860
-# Shell form so MODEL / REVISION / SLOTS / PORT / SLO_TTFT_S / LOG_DATASET can be overridden with -e; exec
-# keeps uvicorn as PID 1 (SIGTERM → graceful drain, then the last log upload). --revision only for a repo
-# id: a mounted folder has none. SLO_TTFT_S: the status page's TTFT SLO threshold, 2 s on the shared CPU.
+# Shell form so every ENV above can be overridden with -e (or a Space variable); exec keeps uvicorn as
+# PID 1 (SIGTERM → graceful drain, then the last log upload). --revision only for a repo id: a mounted
+# folder has none. SLO_TTFT_S: the status page's TTFT SLO threshold, 2 s on the shared CPU.
+# MAX_QUEUE / RATE_LIMIT (requests/min per visitor, 0 = off) / RATE_BURST: load shedding (docs/SERVING.md).
+# SLOTS / MAX_QUEUE / RATE_*: from the 2-CPU load test (docs/SERVING.md "Space defaults"): 8 slots,
+# queue ≈ 2 s TTFT target × throughput, 20 requests/min per visitor with a burst of 5.
+# --trust-proxy only on a Space (HF sets SPACE_ID): there HF's proxy adds the visitor's address to
+# X-Forwarded-For; a plain `docker run` has no proxy, so the header is the client's own and is ignored.
+# PROXY_HOPS: proxies in front that append to that header (the client is that many entries from the right).
 # LOG_DATASET (off when empty): a private HF dataset for the request logs (docs/SERVING.md "Privacy");
 # needs HF_TOKEN with write access to it, and TINYLLM_LOG_SALT to count visitors across restarts.
 CMD exec python -m tinyllm.server --hf-model "$MODEL" \
     $( [ -d "$MODEL" ] || echo --revision "$REVISION" ) \
     $( [ -z "$LOG_DATASET" ] || echo --log-dir /tmp/tinyllm-logs --log-dataset "$LOG_DATASET" ) \
-    --device cpu --host 0.0.0.0 --port "$PORT" --slots "$SLOTS" --slo-ttft-s "$SLO_TTFT_S"
+    $( [ -z "$SPACE_ID" ] || echo --trust-proxy --proxy-hops "$PROXY_HOPS" ) \
+    --device cpu --host 0.0.0.0 --port "$PORT" --slots "$SLOTS" --slo-ttft-s "$SLO_TTFT_S" \
+    --max-queue "$MAX_QUEUE" --rate-limit "$RATE_LIMIT" --rate-burst "$RATE_BURST"

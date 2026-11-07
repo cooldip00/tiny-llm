@@ -427,7 +427,8 @@ class ServerConfig:
     rate_burst: int = 10
     slow_s: float = 10.0                 # requests slower than this log their timeline (warning)
     trust_proxy: bool = False            # take the client IP from X-Forwarded-For (HF Space)
-    salt: str | None = None              # client-hash salt; None = $TINYLLM_LOG_SALT or random
+    proxy_hops: int = 1                  # with trust_proxy: trusted proxies in front, each appending to it
+    salt: str | None = None              # client-hash salt; None = resolve_salt()'s order
     snapshot_s: float = 5.0
     drain_s: float = 30.0
 
@@ -508,6 +509,64 @@ class _Detokenizer:
         return d
 
 
+def forwarded_ip(xff: str, hops: int = 1) -> str | None:
+    """The client's address in an X-Forwarded-For header behind `hops` trusted proxies.
+
+    Each proxy appends the address the request came from, so only the last `hops` entries
+    are trustworthy; anything left of them is whatever the client sent (spoofable, so never
+    the leftmost). With fewer entries than hops, all came from proxies: take the leftmost.
+    """
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    if not parts:
+        return None
+    return parts[-hops] if len(parts) >= hops else parts[0]
+
+
+def resolve_salt(salt: str | None = None) -> tuple[str, str]:
+    """(salt, where it came from) for the client hash. The source is logged, never the salt.
+
+    Order: an explicit salt; $TINYLLM_LOG_SALT (a Space secret, the same value in every
+    replica Space, D-031); a hash of $SPACE_SIGNING_SECRET (HF's per-Space secret, stable
+    across restarts, but different in each Space); else random per start.
+    """
+    if salt:
+        return salt, "config"
+    if s := os.environ.get("TINYLLM_LOG_SALT"):
+        return s, "TINYLLM_LOG_SALT"
+    if s := os.environ.get("SPACE_SIGNING_SECRET"):
+        return hashlib.sha256(f"tinyllm-log-salt:{s}".encode()).hexdigest(), "SPACE_SIGNING_SECRET"
+    return secrets.token_hex(16), "random"
+
+
+def cpu_limit(cgroup: str = "/sys/fs/cgroup") -> int | None:
+    """CPUs this container may use, or None if no limit is known.
+
+    torch sizes its thread pool from the host's cores and ignores the container's CPU quota:
+    under `docker run --cpus 2` on a 16-core host it starts 8 threads, and decode ran ~5x
+    slower than with 2 (6.5b step 5, runs/bench/load/space-cpu/probe-threads-*). Order: the
+    cgroup v2 quota (`cpu.max`, "200000 100000" = 2 CPUs), cgroup v1, then HF's $CPU_CORES.
+    """
+    root = Path(cgroup)
+    try:
+        quota, period = (root / "cpu.max").read_text().split()[:2]
+        if quota != "max":
+            return max(1, math.ceil(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    try:
+        quota = int((root / "cpu" / "cpu.cfs_quota_us").read_text())
+        period = int((root / "cpu" / "cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            return max(1, math.ceil(quota / period))
+    except (OSError, ValueError):
+        pass
+    try:
+        n = math.ceil(float(os.environ.get("CPU_CORES", "")))
+        return n if n > 0 else None
+    except ValueError:
+        return None
+
+
 class Server:
     """State shared by the handlers (app.state.srv)."""
 
@@ -516,13 +575,13 @@ class Server:
         self.cfg = cfg
         self.metrics = metrics
         self.limiter = RateLimiter(cfg.rate_per_min, cfg.rate_burst)
-        self.salt = cfg.salt or os.environ.get("TINYLLM_LOG_SALT") or secrets.token_hex(16)
+        self.salt, self.salt_source = resolve_salt(cfg.salt)
         self.started = False
 
     def client_id(self, request: HTTPRequest) -> str:
         ip = request.client.host if request.client else "unknown"
         if self.cfg.trust_proxy and (xff := request.headers.get("x-forwarded-for")):
-            ip = xff.split(",")[0].strip()
+            ip = forwarded_ip(xff, self.cfg.proxy_hops) or ip
         return hash_client(ip, self.salt)
 
     def record(self, rec: RequestRecord, timeline: dict | None = None) -> None:
@@ -572,7 +631,8 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
             v.worker.start()
         srv.started = True
         log.info("server ready", extra={"fields": {"variants": {v.name: v.version for v in variants},
-                                                   "slo_ttft_s": metrics.slo_ttft_s}})
+                                                   "slo_ttft_s": metrics.slo_ttft_s, "salt": srv.salt_source,
+                                                   "proxy_hops": cfg.proxy_hops if cfg.trust_proxy else 0}})
         yield
         srv.started = False
         log.info("shutting down: draining", extra={"fields": {"drain_s": cfg.drain_s}})
@@ -913,6 +973,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--slo-ttft-s", type=float, default=1.0,
                    help="TTFT SLO threshold on /status (SERVING.md: 1 s local GPU, 2 s on the Space)")
     p.add_argument("--trust-proxy", action="store_true", help="client IP from X-Forwarded-For")
+    p.add_argument("--threads", type=int, default=None,
+                   help="CPU only: torch threads; default the container's CPU limit (cpu_limit), else torch's")
+    p.add_argument("--proxy-hops", type=int, default=1,
+                   help="with --trust-proxy: trusted proxies in front (client = that many entries from the right)")
     p.add_argument("--drain-s", type=float, default=30.0)
     p.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
     p.add_argument("--log-file", default=None, help="also write JSON lines here")
@@ -924,6 +988,16 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     if args.log_dataset and not args.log_dir:
         p.error("--log-dataset needs --log-dir")
+    if args.proxy_hops < 1:
+        p.error("--proxy-hops must be at least 1")
+    if args.threads is not None and args.threads < 1:
+        p.error("--threads must be at least 1")
+    if args.device == "cpu":
+        # an explicit --threads as given; else never more than torch's own choice (no SMT oversubscription)
+        limit = cpu_limit()
+        n = args.threads or (min(limit, torch.get_num_threads()) if limit else None)
+        if n:
+            torch.set_num_threads(n)
 
     setup_logging(args.log_level, args.log_file)
     shipper = None
@@ -938,11 +1012,11 @@ def main(argv: list[str] | None = None) -> None:
                               cuda_graph=args.cuda_graph)
     log.info("model loaded", extra={"fields": {"variant": name, "version": version, "device": args.device,
                                                "slots": args.slots, "max_len": engine.max_len, "kv": args.kv,
-                                               "cuda_graph": args.cuda_graph,
+                                               "cuda_graph": args.cuda_graph, "threads": torch.get_num_threads(),
                                                "load_s": round(time.perf_counter() - t, 2)}})
     cfg = ServerConfig(max_queue=args.max_queue, timeout_s=args.timeout, rate_per_min=args.rate_limit,
                        rate_burst=args.rate_burst, slow_s=args.slow_s, trust_proxy=args.trust_proxy,
-                       drain_s=args.drain_s)
+                       proxy_hops=args.proxy_hops, drain_s=args.drain_s)
     metrics = Metrics(slo_ttft_s=args.slo_ttft_s)
     worker = EngineWorker(engine, metrics, cfg.max_queue, cfg.snapshot_s, name=name)
     app = create_app([Variant(name, version, worker, tok, engine.max_len, model.cfg.vocab_size)], cfg, metrics,

@@ -140,7 +140,7 @@ flowchart LR
 | `Dockerfile`, `hf/` | CPU image of the server; the Hugging Face model card |
 | `src/tinyllm/provenance.py`, `results.py`, `plots.py` | Records where each benchmark number came from (commit, versions, GPU clocks); renders the results tables and plots |
 | `scripts/` | Data, tokenizer, benchmark, load-test (`load_test.py`), HF export (`export_hf.py`) and usage-report (`analyze_logs.py`) scripts |
-| `tests/` | 459 tests: every optimized path is checked against the slow reference path |
+| `tests/` | 470 tests: every optimized path is checked against the slow reference path |
 | `docs/` | Write-ups with the method and dated results of each step: [ARCHITECTURE](docs/ARCHITECTURE.md), [INFERENCE](docs/INFERENCE.md), [SERVING](docs/SERVING.md). Generated tables: [RESULTS](docs/RESULTS.md). Also [HARDWARE](docs/HARDWARE.md), [SETUP](docs/SETUP.md), [RESEARCH](docs/RESEARCH.md) (the attention ablation plan) and [PRIOR_ART](docs/PRIOR_ART.md) (related projects). `docs/img/` holds the plots, drawn by `scripts/bench_all.py` from the runs and `docs/data/` |
 
 ## Reproduce
