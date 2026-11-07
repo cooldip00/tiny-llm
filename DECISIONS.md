@@ -72,6 +72,7 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
     - **Judged with CUDA graphs on**, bf16 and int8 alike. Without graphs, TinyLlama decode at batch 1 is bound by kernel launches (46 vs 128 tok/s), which would hide any kernel gain.
     - **Stop rule:** if int8 doesn't beat bf16 at batch 1 with graphs on within the half day, stop, record what was measured, and keep the README's current explanation.
   - **Rejected:** doing it after v1 (bullets would need rewriting, and the weakness would ship in the v1 README); 4.10a first (spends the timebox on the kernel that changes no published number).
+- **Amendment (2026-11-07), both kernels in v1:** 4.10a runs after 4.10b even if the half day is used up (~1–1.5 h); Triton is capped at one day in total, and 4.10b's stop rule still applies. **Why:** about 11 days remain to v1 for ~18–20 h of planned work, replicas included (D-031). Expect a small end-to-end gain from 4.10a: with CUDA graphs on, launch overhead is already gone, and at batch 1 the norm reads one 2,048-wide activation per token. Its value is a second, simpler kernel under the same checks.
 
 ---
 
@@ -357,3 +358,31 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - Data: `docs/data/load_sweep.json` (2 KB), made by `scripts/extract_load_sweep.py` from the 4.8a `runs/bench/load/4.8a/*-sweep.json` (git-ignored): one summary row per rate, with each file's SHA-256 and commit. The engine labels replace the sweep's `model` field, which holds a local path.
   - A third colour, aqua `#1aa775`, for the third engine; blue / orange / aqua passes the palette checks on white and `#0d1117`. Each engine also has its own marker and a label at the line end.
   - Its alt text is written by hand in the README, outside the generated blocks: the data is a fixed past session, not `runs/bench/v1/`.
+
+### D-031 — Replicas on Hugging Face Spaces behind our own router Space, in v1 · ACCEPTED (2026-11-07). Extends D-028's 6.5b (one Space, a written scaling design)
+- **Context:** D-028 plans one Docker Space and only a written scaling design (replicas, routing, autoscaling on queue depth). The server already has what a load balancer needs: `/health`, `/ready`, `/stats` with queue depth, and a 429 when the queue is full. About 11 days remain to v1.
+- **Choice:**
+  - After 6.5b's single Docker Space works: **two replica Spaces** from the same image, plus a **router Space**.
+  - The router Space runs our `Router` (4.13) with a remote-replica mode:
+    - it polls each replica's `/ready` and `/stats`
+    - it sends each request to the ready replica with the shortest queue
+    - it retries on another replica after a 429 or a connection error
+    - it treats a sleeping replica as down and wakes it
+    - it adds an `X-Replica` header beside `X-Model-Version`
+  - The demo page and status page move to the router Space. **Spaces only:** no separate frontend.
+  - A load test through the router: goodput with 1 vs 2 replicas, on CPU, labelled a routing demo, not a performance number. Performance claims stay with the laptop GPU numbers.
+  - About +5–7 h, before 6.3, so the resume bullets can include it. The 6.1 diagrams come after it: the single-server diagram (one replica), plus a small one of visitor → router Space → replica Spaces.
+  - **Cut order if late:** the 1-vs-2 load test, then the router and replicas move to v1.1. The single Space stays.
+- **Why:**
+  - It makes SERVING.md's written scaling design run.
+  - In 6.9 (v1.1), the canary becomes its own replica Space: a better demo than two variants inside one process.
+  - It needs no GPU, so it can fill 4.10b's cool-down waits.
+- **Caveats:**
+  - Free CPU Spaces sleep when idle, and waking one takes tens of seconds to minutes. Some visitors will see a cold start.
+  - Read Hugging Face's terms on several Spaces serving one app before creating them; keep it to two replicas.
+  - The README says the replicas demonstrate routing, not that the traffic needs them.
+- **Rejected:**
+  - A Vercel frontend with a function as proxy: streaming every token through the function uses the Hobby plan's 4 h / month of CPU, and the demo stops when it runs out. It also adds a second codebase and CORS.
+  - Routing in the browser (the page reads each Space's `/stats`): no server-side canary or rollback, no central logs, and CORS.
+  - A Cloudflare Worker as router: a second language and codebase.
+  - Leaving it to v1.1: there is time before ~11-18.

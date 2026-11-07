@@ -121,7 +121,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
     - Baseline first: rerun `scripts/bench_all.py --only tl-int8 --power-mode performance` once the GPU is cool (the v1 tl-int8 run was thermally throttled).
     - `bench_quant.py` gains a CUDA-graph mode; bf16 and int8 are both measured with graphs on (without them, batch-1 decode is bound by kernel launches and hides the kernel).
     - **Stop rule:** if int8 doesn't beat bf16 at batch 1 with graphs on within the half day, stop, record the numbers in PROGRESS, and leave the README's INT8 explanation as it is.
-  - [ ] 4.10a Fused RMSNorm + residual add, only if the half day has time left
+  - [ ] 4.10a Fused RMSNorm + residual add, after 4.10b (~1–1.5 h); Triton capped at one day in total (D-016 amendment, 2026-11-07)
   - For each kernel: `allclose` against the PyTorch reference, achieved GB/s as a % of the measured peak, and end-to-end tok/s delta in the engine
   - Stop after these two. Further kernels go to PARKING_LOT.md
 
@@ -146,11 +146,12 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ## Phase 6 — Writeup
 - [ ] 6.1 README: what, why, results, how to reproduce
   - a serving architecture diagram (D-028 amendment, ~20 min, after 4.13): client → router → engine thread → slots / KV, and where each metric is measured; also in docs/SERVING.md
+    - _D-031 (2026-11-07): drawn after the replicas. This diagram is one replica; a second, small one shows visitor → router Space → replica Spaces._
 - [x] 6.2 Plots: loss curves, inference speedups, ablation trade-offs. _Done 2026-11-06 (D-030): five SVGs in `docs/img/`, drawn by `bench_all.py` from the run behind the tables; three in the README, four in RESULTS.md. The ablation plots moved to 5.5._
 - [ ] 6.3 3–4 resume bullets with real numbers
 - [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
 - [ ] 6.5 Publish (added by D-021), in this order:
-  - [ ] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1). Plots added 2026-11-06 (6.2); pinning is still to do._
+  - [x] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1). Plots added 2026-11-06 (6.2); pinned 2026-11-07._
   - [ ] 6.5b Hugging Face: our model with a model card, plus a small Gradio Space demo
     - _D-028 (2026-11-06; design in [docs/SERVING.md](docs/SERVING.md)), about +2–3 h:_
       - The Space runs our FastAPI server (same code as 4.13) with the demo page mounted on it. The 30M model is framed as story continuation (a TinyStories base model), with example openings.
@@ -165,6 +166,12 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
       - A Docker Space, built from the same image as the local server; a one-line `docker run` in the README.
       - A CI job that builds the image, starts it on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion.
       - The status page shows the error budget left for each SLO from 4.13 step 3.
+    - _D-031 (2026-11-07), about +5–7 h, after the single Docker Space works, before 6.3:_
+      - Two replica Spaces from the same image, plus a router Space running our `Router` with a remote-replica mode: polls `/ready` and `/stats`, shortest queue wins, retries elsewhere on a 429 or connection error, wakes a sleeping replica, adds `X-Replica`. CPU tests against fake replicas.
+      - The demo and status pages move to the router Space. Spaces only, no separate frontend.
+      - Load test through the router: goodput with 1 vs 2 replicas, labelled a routing demo.
+      - Before creating them: read Hugging Face's terms on several Spaces serving one app.
+      - If late, cut first the 1-vs-2 load test, then move the router and replicas to v1.1.
   - [ ] 6.5c W&B project set to public; link the training curves from the README
   - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume
   - [ ] 6.5e LinkedIn: three posts, one per milestone (training done → KV cache + paged KV → TinyLlama results)
@@ -218,7 +225,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 - [ ] 6.9 Release strategies (D-028, **v1.1**, after v1: ~11-19 → 11-21, ~9–10 h; design in [docs/SERVING.md](docs/SERVING.md)), built on 4.13's `Router`:
   - blue-green: two engines loaded, an admin switch, drain, instant rollback (~2 h)
   - shadow: mirror 10–20% of traffic when the live queue is idle; a report on token agreement, the latency difference and the impact on live latency (~2–3 h)
-  - canary: a weighted router (5% → 25% → 100%), automatic rollback on error rate or SLO vs live, demonstrated with the load generator and a deliberately degraded variant (~2 h)
+  - canary: a weighted router (5% → 25% → 100%), automatic rollback on error rate or SLO vs live, demonstrated with the load generator and a deliberately degraded variant (~2 h). With D-031's replicas, the canary runs as its own replica Space.
   - A/B: sticky assignment by hashed client id, thumbs up / down, a significance test and CIs, validated with simulated users, plus the sample size a real verdict needs (~3 h)
   - variant id = checkpoint hash + git commit
   - a written promotion pipeline: offline gate → shadow → canary → live
@@ -278,8 +285,8 @@ The table above was the original plan. Phases 0–3 were done on Day 1 (2026-11-
 | 2026-11-04 → 11-05 | 4.12 benchmark provenance; 4.9a `gqa`; 4.9b load TinyLlama; 4.9c logits match HF |
 | 2026-11-06 → 11-08 | 4.11 CUDA graphs on decode; 4.9d TinyLlama benchmarks vs the ceiling; vLLM + llama.cpp install spike |
 | 2026-11-09 → 11-11 | 6.7 CI; first README; repo public → **v1-preview**. Checkpoint on 11-09 (D-022) |
-| 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; 4.10b Triton INT8 GEMV before 6.3 (D-016 amendment); rest of Phase 6 → **v1** |
-| If ahead | 4.7 prompt-lookup decoding, 4.10a fused RMSNorm |
+| 2026-11-12 → 11-18 | 4.11b graphs in the continuous engine (D-027, starts 11-06); 4.13 HTTP server + load generator; 4.8a TinyLlama vs vLLM / llama.cpp; 4.8b export; 6.8 one-command tables; 4.10b then 4.10a Triton before 6.3 (D-016 amendments); replicas + router Space after 6.5b's single Space (D-031); rest of Phase 6 → **v1** |
+| If ahead | 4.7 prompt-lookup decoding |
 | 2026-11-19 → 11-21 | 6.9 release strategies (D-028) → **v1.1** |
 | After v1 | Phase 5, Phase 7 |
 
