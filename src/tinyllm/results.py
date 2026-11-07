@@ -60,6 +60,10 @@ BENCHES = [
     Bench("tl-kv-graph", "bench_generate.py", (*TL, "--engine", "kv-graph"), "tinyllama/kv-graph.json", 6),
     Bench("tl-serving", "bench_serving.py", (*TL, "--cuda-graph"), "tinyllama/serving.json", 15),
     Bench("tl-int8", "bench_quant.py", TL, "tinyllama/int8.json", 10),
+    # 4.10b: the Triton INT8 kernel, end to end with CUDA graphs, and its matmuls alone
+    Bench("tl-int8-graph", "bench_quant.py", (*TL, "--engine", "kv-graph", "--triton"),
+          "tinyllama/int8_graph_triton.json", 12),
+    Bench("tl-int8-gemv", "bench_int8_gemv.py", (), "tinyllama/int8_gemv.json", 3),
     Bench("tl-profile", "profile_decode.py", (*TL, "--batch", "1"), "tinyllama/profile/decode_tinyllama_B1.json", 2),
 ]
 BY_NAME = {b.name: b for b in BENCHES}
@@ -234,6 +238,35 @@ def int8_section(d: dict) -> str:
     return text
 
 
+GEMV_VARIANTS = [("bf16", "bf16"), ("torch", "PyTorch int8"), ("triton", "Triton int8")]
+
+
+def gemv_bandwidth(d: dict, m: int, v: str) -> tuple[float, float]:
+    """(bytes one decode step's matmuls must read, % of the measured bandwidth) for variant v at m rows."""
+    rows = [r for r in d["rows"] if r["m"] == m]
+    nbytes = sum(r[f"{v}_gb_s"] * r[f"{v}_us"] * 1e3 * r["per_step"] for r in rows)    # GB/s × µs = kB
+    return nbytes, 100 * nbytes / (d["step_us"][str(m)][v] * 1e-6) / d["bandwidth"]
+
+
+def gemv_table(d: dict) -> str:
+    ms = sorted(map(int, d["step_us"]))
+    rows = []
+    for m in ms:
+        s = d["step_us"][str(m)]
+        rows.append([str(m), *[f"{s[v] / 1e3:.2f}" for v, _ in GEMV_VARIANTS],
+                     _ratio(s["bf16"] / s["triton"]), _ratio(s["torch"] / s["triton"], 1)])
+    text = table(["Rows (batch)", *[f"{lab} ms" for _, lab in GEMV_VARIANTS], "Triton vs bf16",
+                  "Triton vs PyTorch int8"], rows)
+    (b_bf, p_bf), (b_tr, p_tr) = gemv_bandwidth(d, ms[0], "bf16"), gemv_bandwidth(d, ms[0], "triton")
+    calls = sum(r["per_step"] for r in d["rows"] if r["m"] == ms[0])
+    return text + (
+        f"\n\nTime for every matmul of one decode step (the {calls} Linears), replayed in CUDA graphs over weight "
+        f"copies larger than the L2 cache, so each call reads its weight from memory. At {ms[0]} row, a step must "
+        f"read {n(b_bf / 2**20)} MiB of bf16 weights or {n(b_tr / 2**20)} MiB of int8 weights and scales: bf16 "
+        f"runs at {p_bf:.0f}% of the measured {d['bandwidth'] / 1e9:.0f} GB/s, the Triton kernel at {p_tr:.0f}%. "
+        "PyTorch int8 casts each weight back to bf16 first, so it moves more bytes than bf16, not fewer.")
+
+
 def serving_baseline(rows: list[dict], r: dict) -> tuple[dict, str] | None:
     """Static has none; continuous vs static at the same size; graphs vs continuous; paged vs 8 contiguous slots."""
     e, s = r["engine"], r["size"]
@@ -365,8 +398,16 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
         "", img("img/decode_b1.svg", b1_alt(data)),
         "", "### Decode by batch size and prompt length", "",
         decode_grid(data, tl_gen), "", img("img/batch_scaling.svg", scaling_alt(data)), "",
-        "", "### INT8 weights (per-row, cast back to bf16 per call)", "",
+        "", "### INT8 weights (per-row scales)", "",
+        "Two ways to run an int8 matmul: `int8` casts the weight back to bf16 on every call (plain PyTorch); "
+        "`int8-triton` is our Triton kernel, which reads the int8 weight and dequantizes in registers (4.10b).",
+        "", "#### Eager decode (KV cache, no graphs)", "",
         int8_section(data["tl-int8"]), "", heat_line(data, ["tl-int8"]),
+        "", "#### With CUDA graphs: PyTorch path vs Triton kernel", "",
+        "Each variant is timed with only its own weights on the GPU.", "",
+        int8_section(data["tl-int8-graph"]), "", heat_line(data, ["tl-int8-graph"]),
+        "", "#### The matmuls alone", "",
+        gemv_table(data["tl-int8-gemv"]), "", heat_line(data, ["tl-int8-gemv"]),
         "", "### Serving: static vs continuous batching, with and without CUDA graphs", "",
         serving_table(data["tl-serving"]), "", heat_line(data, ["tl-serving"]),
         "", "### Logits vs HF Transformers", "",
@@ -478,16 +519,16 @@ def readme_blocks(data: dict) -> dict[str, str]:
     prof = data["tl-profile"]["modes"]
     kv32 = at("tl-kv", 32)
     host_bound = prof["eager"]["gpu_idle_frac"] >= 0.5
-    i8 = data["tl-int8"]
-    i8r = {b: need(i8["rows"], "tl-int8", variant="int8", batch=b)["decode_tok_s"]
-           / need(i8["rows"], "tl-int8", variant="bf16", batch=b)["decode_tok_s"] for b in (1, 32)}
-    slower = i8r[1] < 1 and i8r[32] < 1
-    int8_text = (f"- **INT8 weights:** val loss {i8['val_loss']['int8'] - i8['val_loss']['bf16']:+.4f}, "
-                 f"{i8['teacher_forced']['int8']['argmax_agree']:.1%} argmax agreement with bf16; decode is "
-                 f"{_ratio(i8r[1])} bf16 at batch 1, {_ratio(i8r[32])} at batch 32.")
-    if slower:
-        int8_text += (" Slower, not faster: the weight is cast back to bf16 on every call, so each step moves "
-                      "more bytes, not fewer. A fused dequantize-and-multiply kernel fixes this; it's on the roadmap.")
+    i8 = data["tl-int8-graph"]
+    vs_bf16 = lambda v, b: (need(i8["rows"], "tl-int8-graph", variant=v, batch=b)["decode_tok_s"]   # noqa: E731
+                            / need(i8["rows"], "tl-int8-graph", variant="bf16", batch=b)["decode_tok_s"])
+    tri, cast = {b: vs_bf16("int8-triton", b) for b in (1, 32)}, {b: vs_bf16("int8", b) for b in (1, 32)}
+    int8_text = (f"- **INT8 weights:** val loss {i8['val_loss']['int8-triton'] - i8['val_loss']['bf16']:+.4f}, "
+                 f"{i8['teacher_forced']['int8-triton']['argmax_agree']:.1%} argmax agreement with bf16. Our "
+                 "Triton kernel reads the int8 weight and dequantizes inside the matmul; with CUDA graphs, decode "
+                 f"is {_ratio(tri[1])} bf16 at batch 1 and {_ratio(tri[32])} at batch 32. Casting the weight back "
+                 f"to bf16 on every call (plain PyTorch) gives {_ratio(cast[1])} and {_ratio(cast[32])}")
+    int8_text += (": it moves more bytes than bf16, not fewer." if cast[1] < 1 and cast[32] < 1 else ".")
     eager_text = (f"- **Eager decode is {'host-bound' if host_bound else 'slow'}.** At batch 1, HF and our eager "
                   f"engine take {hf1['ms_per_step']:.1f} and {kv1['ms_per_step']:.1f} ms per step "
                   f"(ours {kv32['ms_per_step']:.1f} ms at batch 32). The profiler shows the GPU idle "

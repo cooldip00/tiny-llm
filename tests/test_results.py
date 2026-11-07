@@ -52,14 +52,26 @@ def serving(paged):
 
 
 def int8(base, variants):
-    rows = [{"variant": v, "batch": b, "decode_tok_s": 100.0 * b * (0.8 if v == "int8" else 1.0)}
+    speed = {"int8": 0.8, "int8-triton": 1.4}
+    q = lambda v: v.startswith("int8")                                          # noqa: E731
+    rows = [{"variant": v, "batch": b, "decode_tok_s": 100.0 * b * speed.get(v, 1.0)}
             for b in (1, 8, 32) for v in variants]
     return {"baseline": base, "provenance": prov(), "rows": rows,
             "weights_mib": {v: {"matmul": 100.0, "embedding": 10.0, "other": 0.1} for v in variants},
-            "val_loss": {v: 1.6 + (0.001 if v == "int8" else 0.0) for v in variants},
-            "teacher_forced": {**{v: {"argmax_agree": 0.985 if v == "int8" else 1.0} for v in variants},
+            "val_loss": {v: 1.6 + (0.001 if q(v) else 0.0) for v in variants},
+            "teacher_forced": {**{v: {"argmax_agree": 0.985 if q(v) else 1.0} for v in variants},
                                "_median_gap": 2.0},
-            "greedy_rows_identical": {v: (0 if v == "int8" else 8) for v in variants}}
+            "greedy_rows_identical": {v: (0 if q(v) else 8) for v in variants}}
+
+
+def gemv():
+    # One shape, 10 calls per step, 1 MiB of bf16 weight per call: a 10 MiB step for bf16, 5 MiB for int8.
+    us = {"bf16": 50.0, "torch": 150.0, "triton": 25.0}
+    mib = {"bf16": 2**20, "torch": 2**19, "triton": 2**19}
+    rows = [{"shape": "w", "m": m, "per_step": 10, **{f"{v}_us": us[v] for v in us},
+             **{f"{v}_gb_s": mib[v] / (us[v] * 1e3) for v in us}} for m in (1, 32)]
+    return {"bandwidth": 423e9, "provenance": prov(), "rows": rows,
+            "step_us": {str(m): {v: 10 * us[v] for v in us} for m in (1, 32)}}
 
 
 def logits():
@@ -88,6 +100,7 @@ def fake_run(tmp_path: Path) -> Path:
         "30m-profile": profile(), "tl-logits": logits(),
         "tl-hf": gen(4.5), "tl-naive": gen("naive", batches=(1,)), "tl-kv": gen(4.5), "tl-kv-graph": gen(12.8),
         "tl-serving": serving(paged=False), "tl-int8": int8("bf16", ["bf16", "int8"]), "tl-profile": profile(),
+        "tl-int8-graph": int8("bf16", ["bf16", "int8", "int8-triton"]), "tl-int8-gemv": gemv(),
     }
     for name, d in files.items():
         p = tmp_path / R.BY_NAME[name].out
@@ -128,6 +141,10 @@ def test_render_results_from_one_run(tmp_path):
     assert "1.50× static" in page                                        # continuous 300 / static 200
     assert "1.50× continuous 8 (same KV memory)" in page                 # paged/16 at 32: 450 / 300
     assert "0.80×" in page and "int8 +0.0010" in page
+    assert "| 1 | 100 | 80 | 140 | 0.80× | 1.40× |" in page                # graphs table: bf16 / int8 / int8-triton
+    assert "| 1 | 0.50 | 1.50 | 0.25 | 2.00× | 6.0× |" in page              # matmuls alone, ms per step
+    assert "(the 10 Linears)" in page and "read 10 MiB of bf16 weights or 5 MiB" in page
+    assert "bf16 runs at 5% of the measured 423 GB/s, the Triton kernel at 5%" in page   # 5 MiB / 250 µs
     assert "1,600 MHz (min 1,400), 80 °C, sw_power_cap" in page and "gpu_idle" not in page
     assert "None" not in page and "\n\n\n" not in page and "Throttling warnings" not in page
     assert "token 43 / token 43" in page and " ‡" in page                # 30M naive at P=512 slides its window
@@ -144,6 +161,8 @@ def test_readme_blocks_replace_only_inside_markers(tmp_path):
     assert "old highlights" not in out and "old table" not in out
     assert "decodes at 128 tok/s at batch 1" in out and "2.8× HF `generate`" in out
     assert "bit-identical" in out and "all 415 test positions" in out and "margin ≤ 0.019" in out
+    assert "decode is 1.40× bf16 at batch 1 and 1.40× at batch 32" in out
+    assert "(plain PyTorch) gives 0.80× and 0.80×: it moves more bytes" in out and "roadmap" not in out
     assert "fits 25 sequences" in out and "| Paged KV cache (30M model) | same 64 MiB, 25 sequences | 450 | 1.50× |" in out
     assert R.render_readme(out, data) == out                              # idempotent
 
@@ -162,7 +181,7 @@ def test_missing_file_names_the_rerun(tmp_path):
     (run / R.BY_NAME["tl-serving"].out).unlink()
     with pytest.raises(R.MissingResult, match=r"tinyllama/serving\.json.*--only tl-serving"):
         R.load_run(run)
-    with pytest.raises(R.MissingResult, match="14 result file"):
+    with pytest.raises(R.MissingResult, match="16 result file"):
         R.load_run(tmp_path / "empty")
 
 
