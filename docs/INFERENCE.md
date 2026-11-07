@@ -343,7 +343,7 @@ Reading:
 | decode (cached) | **ours bf16** | 264 | 0.560 | 0.0207 | 2.6e-4 | 98.86% |
 | decode (cached) | HF bf16 (SDPA) | 264 | 0.560 | 0.0207 | 2.6e-4 | 98.86% |
 
-- **Ours in bf16 is bit-identical to HF in bf16** (`torch.equal`) at all 415 positions, prefill and decode. We do the same ops in the same order in the same dtype: RMSNorm in fp32 then cast, `rotate_half` RoPE, SDPA with `enable_gqa`, SwiGLU.
+- **Ours in bf16 is bit-identical to HF in bf16** (`torch.equal`) at all 415 positions, prefill and decode. We do the same ops in the same order in the same dtype: RMSNorm in fp32 then cast, `rotate_half` RoPE, SDPA with `enable_gqa`, SwiGLU. _(This holds with the PyTorch norm. Since D-032 the default is the Triton norm, which sums in a different order: max |Δ| vs HF bf16 0.34, same top token at 100% / 99.2% of prefill / decode positions; with `--norm-backend torch` it is still bit-identical. See 4.10c below.)_
 - The 3 top-1 flips against fp32 are the same 3 positions for both. They are near-ties: fp32's top-2 margin there is 0.002 / 0.007 / 0.019 logits, vs a median margin of 1.7. That's why "top-1 ≥ 99%" was the wrong done-when (HF bf16 fails it too). The test now checks "no more flips than HF + 1, each at a margin < 0.1".
 - Free-running greedy text: ours == HF bf16 on all 5 prompts. Both leave the fp32 path at the same token (24, 32 and 43 on three prompts; never on the other two).
 - Tiny random Llamas on CPU in fp32 (GQA 4/2, θ = 500, tied and untied), against HF eager, in both conversion directions (HF → ours, and ours → HF via `save_as_hf`): max diff ~2e-5 on logits of ~12 (rounding). For comparison, a wrong `rope_theta` gives a max diff of ~14. KV-cached decode matches too, and greedy `generate` is token-identical.
@@ -421,7 +421,7 @@ Decode tok/s (% of ceiling):
   - **INT8 is slower, and more so at larger batch.** `Int8Linear` casts the whole weight to bf16 every call, so each step reads 1 byte, writes 2 and reads 2 again per weight, instead of reading 2. Overhead hides this at B=1; it shows once the step gets closer to bandwidth-bound. Peak VRAM 6.9 GiB at B=32 (both variants resident, plus the cast temporaries). The fix is a fused dequant GEMV (4.10b).
 - Correctness checks (not asserted; bf16 near-ties, per the reference-answer rule):
   - Every engine's timed loop equals its `generate()` / `sample()` greedy output (asserted).
-  - KV vs naive: 1/8 rows identical. Teacher-forced max |logit diff| 1.53 on a logit scale of 33, argmax agreement 99.17%. That fits 4.9c, where each bf16 path is up to 0.76 off fp32.
+  - KV vs naive: 1/8 rows identical. Teacher-forced max |logit diff| 1.53 on a logit scale of 33, argmax agreement 99.17%. That fits 4.9c, where each bf16 path is up to 0.76 off fp32. _(4.10c rerun, Triton norm: 0/8 rows, 25.05% of tokens identical; max |logit diff| 0.461 on a scale of 32.2, argmax agreement 99.41%. Near-tie flips, as before.)_
   - Graphs vs eager KV: teacher-forced max diff 0.58, argmax 98.97%, 21 flips, all at an eager margin ≤ 0.125 (median 2.0).
   - HF `generate` vs our KV: 2/8 greedy rows identical. Teacher-forced argmax agreement 99.41%, 6 flips, all at our margin ≤ 0.125 (1 bf16 ulp at that scale; median 1.6). 4.9c was bit-identical because both models ran plain bf16 there; here ours runs under autocast.
 - Not done: the vLLM / llama.cpp rows (4.8a), CUDA graphs for the serving engines (PARKING_LOT), and the fused INT8 kernel (4.10b). _(INT8 kernel done 2026-11-07, see 4.10b below.)_
@@ -507,6 +507,28 @@ Decode tok/s (% of ceiling):
   - _Heat: busy SM clock median 1,620 MHz (min 1,440), 85 °C, sw_power_cap + sw_thermal_slowdown; no hardware slowdown._
 - **Why only 4–7%:** fusing the 45 norms (2 per layer × 22, plus the final one) saves about 0.5 ms of a 7.8 ms step at batch 1; most of the step is the weight reads (matmuls) and attention. The gain is in launch count and fixed per-kernel cost, so it shrinks as the batch grows.
 - **Default switched (D-032):** `"triton"` is the default backend since 2026-11-07, because vLLM and llama.cpp both fuse their norms. All GPU tables are rerun in one session before 6.5b, so no table mixes the two norms; this ablation stays as the record of what the kernel alone is worth.
+
+### 4.10c Every GPU table rerun with the Triton norm (2026-11-07)
+- **What:** D-032 made the Triton norm the default, so every GPU table was rerun in one session, and no table mixes the two norms.
+  - `bench_all --run --dir runs/bench/v1b`: all 17 benchmarks, commit `3928889`, NitroSense performance, fans Max, room fan overhead, cooled to 60 °C between benchmarks. It took 1 h 44 min (log `runs/bench/4.10c/bench_all_*.log`).
+  - Then the 4.8a load sweep against vLLM and llama.cpp, one engine at a time, into `runs/bench/load/4.10c/` (1 h 11 min; see [SERVING.md](SERVING.md)).
+  - Then `tinyllama_vs_hf.py --norm-backend torch` into `runs/bench/v1b/tinyllama/logits_vs_hf_torchnorm.json` (51 s).
+  - `runs/bench/v1/` is kept, and backed up before the run. Every model JSON records `norm_backend: "triton"`.
+  - README and `docs/RESULTS.md` now render from `v1b`.
+- **TinyLlama, KV cache + CUDA graphs** (v1 → v1b):
+  - Decode tok/s: batch 1 127 → 137 (66% → 71% of the ceiling), batch 8 814 → 886, batch 32 1,984 → 2,138.
+  - TTFT down 10–15%.
+  - The eager engines gain more (KV 49 → 54 tok/s at batch 1), because without graphs each saved launch also saves host time.
+- **INT8 with the Triton kernel:** batch 1 1.45× → 1.47× bf16; its own speed 186 → 200 tok/s.
+- **Serving:**
+  - static / continuous / continuous + graphs: 189 / 261 / 581 → 218 / 299 / 637 tok/s.
+  - The ratios barely move: continuous 1.37× static, paged 1.64× contiguous.
+- **Logits vs HF:** with the Triton norm, max |Δ| vs HF bf16 is 0.34 in prefill and 0.28 in decode, and the top-1 token is the same as HF's at 100% and 99.24% of positions. With the PyTorch norm (same session), it is bit-identical at all 415 positions again. So the only difference from HF is the norm's summation order. Top-1 vs fp32 is unchanged: 98.86% in decode for ours and for HF.
+- **Heat matched v1:**
+  - Two benchmarks raised `bench_all`'s throttle warning; neither was rerun.
+  - `30m-serving` had a busy-clock median of 1,155 MHz, because its light configs let the GPU clock down at 52–57 °C. That is not throttling: v1 had 1,267 MHz.
+  - `tl-int8-graph` showed hardware-slowdown flags, as in v1, with its three rounds within ~2%.
+  - The clock-based check misfires on mixed-load benchmarks (PARKING_LOT).
 
 ## Results: Triton kernels (fill in)
 | Kernel | Shape | PyTorch time | Triton time | Achieved GB/s | % of peak | End-to-end tok/s Δ |

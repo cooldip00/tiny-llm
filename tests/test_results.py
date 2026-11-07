@@ -191,6 +191,26 @@ def test_readme_blocks_replace_only_inside_markers(tmp_path):
     assert R.render_readme(out, data) == out                              # idempotent
 
 
+def test_logit_gap_names_the_triton_norm_only_with_torchnorm_evidence(tmp_path):
+    run = fake_run(tmp_path)
+    p = run / R.BY_NAME["tl-logits"].out
+    d = json.loads(p.read_text())
+    d["provenance"]["norm_backend"] = "triton"
+    for ph in d["stats"].values():
+        ph["bit_identical_to_hf_bf16"], ph["ours_vs_hf_bf16"]["max_abs"] = False, 0.34
+    p.write_text(json.dumps(d))
+    data = R.load_run(run)                                                # no EXTRAS file: no cause claimed
+    assert data["tl-logits-torchnorm"] is None
+    out = R.render_readme(README, data)
+    assert "within 0.34" in out and "same top token at 100.0% of prefill" in out and "Triton RMSNorm" not in out
+    (run / R.EXTRAS["tl-logits-torchnorm"]).write_text(json.dumps(logits()))   # bit-identical with torch norm
+    data = R.load_run(run)
+    out = R.render_readme(README, data)
+    assert "The difference is our Triton RMSNorm (D-032)" in out
+    page = R.render_results(data)
+    assert "| prefill, triton norm |" in page and "| decode, torch norm | 264 | yes |" in page
+
+
 def test_replace_block_rejects_bad_markers():
     with pytest.raises(ValueError):
         R.replace_block("no markers", "x", "body")

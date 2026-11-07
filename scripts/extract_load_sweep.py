@@ -1,10 +1,11 @@
-"""Extract the 4.8a load sweeps (ours vs vLLM vs llama.cpp, 8 sequences each) into a small committed JSON (D-030).
+"""Extract the load sweeps (ours vs vLLM vs llama.cpp, 8 sequences each) into a small committed JSON (D-030).
 
 runs/ is git-ignored, so without this file the README's load plot could not be redrawn from the repo.
 bench_all.py draws docs/img/load_sweep.svg from it. Per-request timings stay in runs/; this keeps one
-summary row per request rate.
+summary row per request rate. The default --dir is the latest sweep (4.10c, rerun with D-032's Triton
+norm); the 4.8a sweep is kept in runs/bench/load/4.8a.
 
-    uv run python scripts/extract_load_sweep.py     # runs/bench/load/4.8a/*-sweep.json -> docs/data/load_sweep.json
+    uv run python scripts/extract_load_sweep.py [--dir runs/bench/load/4.10c]   # *-sweep.json -> docs/data/load_sweep.json
 """
 
 import argparse
@@ -14,7 +15,7 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-# file stem -> label; the equal-seat comparison of docs/SERVING.md (4.8a)
+# file stem -> label; the equal-seat comparison of docs/SERVING.md (4.8a, rerun in 4.10c)
 ENGINES = {"ours-8slots": "Ours", "vllm-8seqs": "vLLM", "llamacpp-bf16": "llama.cpp"}
 
 
@@ -31,10 +32,12 @@ def summarize(d: dict) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--dir", type=Path, default=REPO / "runs/bench/load/4.8a")
+    p.add_argument("--dir", type=Path, default=REPO / "runs/bench/load/4.10c")
     p.add_argument("--out", type=Path, default=REPO / "docs/data/load_sweep.json")
     args = p.parse_args()
-    out = {"source": "runs/bench/load/4.8a", "columns": ["rate_rps", "achieved_rps", "tok_s", "ttft_p95_s", "shed_rate"],
+    src = args.dir.resolve()
+    src = src.relative_to(REPO).as_posix() if src.is_relative_to(REPO) else src.name   # never a personal path
+    out = {"source": src, "columns": ["rate_rps", "achieved_rps", "tok_s", "ttft_p95_s", "shed_rate"],
            "engines": {}}
     for stem, label in ENGINES.items():
         raw = (args.dir / f"{stem}-sweep.json").read_bytes()

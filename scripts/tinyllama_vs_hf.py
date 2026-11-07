@@ -8,6 +8,7 @@ so the "decode" rows measure the cached path, not a full forward. Free-running g
 also compared (first token where ours and HF bf16 diverge).
 
     uv run python scripts/tinyllama_vs_hf.py [--new-tokens 64] [--out runs/bench/tinyllama_vs_hf.json]
+        [--norm-backend torch]   # our RMSNorm code; default: the model default (D-032, triton on CUDA)
 """
 
 import argparse
@@ -20,7 +21,7 @@ from transformers import LlamaForCausalLM
 from tinyllm.generate import generate
 from tinyllm.hf_llama import TINYLLAMA, TINYLLAMA_REV, HFTokenizer, download, load_from_dir
 from tinyllm.logit_compare import first_divergence, hf_stepwise, logit_stats, ours_stepwise
-from tinyllm.model import norm_backend
+from tinyllm.model import norm_backend, set_norm_backend
 from tinyllm.provenance import Provenance, claim_output
 
 CHAT = [
@@ -47,6 +48,8 @@ def main() -> None:
     p.add_argument("--new-tokens", type=int, default=64)
     p.add_argument("--out", default="runs/bench/tinyllama_vs_hf.json")
     p.add_argument("--overwrite", action="store_true", help="replace an existing --out (6.8)")
+    p.add_argument("--norm-backend", choices=["triton", "torch"], default=None,
+                   help="RMSNorm code for our model (4.10c); default: the model default (D-032)")
     args = p.parse_args()
     out = claim_output(args.out, args.overwrite)
     N = args.new_tokens
@@ -55,8 +58,9 @@ def main() -> None:
     prompts = [tok.encode(tok.chat_prompt(q)) for q in CHAT] + [tok.encode(PLAIN)]
     prompts = [torch.tensor([x], device="cuda") for x in prompts]
     gen = dict(max_new_tokens=N, do_sample=False, temperature=None, top_p=None, top_k=None)
+    nb = "torch" if args.norm_backend == "torch" else norm_backend()
     prov = Provenance(weights="ref fp32 / HF bf16 / ours bf16", script="tinyllama_vs_hf",
-                      model=f"{TINYLLAMA}@{TINYLLAMA_REV[:7]}", norm_backend=norm_backend()).start()
+                      model=f"{TINYLLAMA}@{TINYLLAMA_REV[:7]}", norm_backend=nb).start()
 
     # 1. fp32 reference: greedy continuation (the shared sequence) and its full-forward logits.
     hf = hf_model(path, torch.float32, "eager")
@@ -76,6 +80,9 @@ def main() -> None:
     greedy["hf_bf16"] = [hf.generate(x, **gen)[0, x.shape[1]:].tolist() for x in prompts]
     free(hf)
     ours = load_from_dir(path)
+    if args.norm_backend:
+        set_norm_backend(ours, args.norm_backend)
+    assert norm_backend(ours) == nb, (norm_backend(ours), nb)   # provenance records what ran
     logits["ours_bf16"] = [ours_stepwise(ours, s, x.shape[1]) for s, x in zip(seqs, prompts)]
     greedy["ours_bf16"] = []
     for x in prompts:                                     # stop at EOS like HF does, then trim the same way

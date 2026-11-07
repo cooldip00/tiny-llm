@@ -5,7 +5,7 @@
     uv run python scripts/bench_all.py --only tl-serving --power-mode performance   # rerun one, then render
     uv run python scripts/bench_all.py --list                            # benchmarks, commands, outputs
 
-Render: reads runs/bench/v1/ (--dir) and rewrites docs/RESULTS.md (generated in full) and the README's
+Render: reads runs/bench/v1b/ (--dir) and rewrites docs/RESULTS.md (generated in full) and the README's
 <!-- bench:NAME --> blocks (the rest of the README stays byte-identical). A missing result file is an
 error naming the --only command that makes it. It also draws the plots into docs/img/ (6.2, D-030;
 the training and load-test plots from docs/data/train_curve.json and load_sweep.json), byte-identical
@@ -185,7 +185,7 @@ def render(run_dir: Path, results_md: Path, readme: Path, img_dir: Path = Path("
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--dir", type=Path, default=Path("runs/bench/v1"), help="the run directory")
+    p.add_argument("--dir", type=Path, default=Path("runs/bench/v1b"), help="the run directory (v1b: the D-032 rerun, 4.10c)")
     p.add_argument("--run", action="store_true", help="run every benchmark into a fresh --dir, then render")
     p.add_argument("--only", default=None, help="comma-separated benchmark names to rerun into --dir")
     p.add_argument("--power-mode", default=None, help="NitroSense mode, recorded (required to run)")

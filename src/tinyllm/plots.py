@@ -55,7 +55,7 @@ def _foot(ax, text: str, below: float = 34) -> None:
 
 def _source(data: dict, name: str) -> str:
     commit = (((data[name].get("provenance") or {}).get("git") or {}).get("commit") or "?")[:7]
-    return f"tiny-llm · {data.get('_run_dir', 'runs/bench/v1')} · commit {commit} · RTX 3070 Ti Laptop GPU"
+    return f"tiny-llm · {data.get('_run_dir', 'runs/bench/v1b')} · commit {commit} · RTX 3070 Ti Laptop GPU"
 
 
 def decode_b1(data: dict) -> Figure:

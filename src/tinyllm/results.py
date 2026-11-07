@@ -1,6 +1,6 @@
 """Step 6.8 (D-029): the results tables, rendered from one benchmark run's JSON files.
 
-scripts/bench_all.py runs every benchmark in BENCHES into one directory (runs/bench/v1/), then calls
+scripts/bench_all.py runs every benchmark in BENCHES into one directory (runs/bench/v1b/), then calls
 render_results() for docs/RESULTS.md and render_readme() for the README's <!-- bench:NAME --> blocks.
 Everything here is pure (JSON in, markdown out), so the CPU tests cover it without a GPU.
 
@@ -70,6 +70,9 @@ BENCHES = [
 ]
 BY_NAME = {b.name: b for b in BENCHES}
 MANIFEST = "manifest.json"
+# Optional results run by hand, read when present (None otherwise). 4.10c: tl-logits with our RMSNorm forced
+# to the PyTorch code (tinyllama_vs_hf.py --norm-backend torch), which shows where D-032's logit gap comes from.
+EXTRAS = {"tl-logits-torchnorm": "tinyllama/logits_vs_hf_torchnorm.json"}
 
 
 class MissingResult(Exception):
@@ -88,6 +91,8 @@ def load_run(run_dir: str | Path) -> dict:
         lines = "\n".join(f"  {run_dir / b.out}  ->  scripts/bench_all.py --only {b.name}" for b in gaps)
         raise MissingResult(f"{len(gaps)} result file(s) missing from {run_dir}:\n{lines}")
     data = {b.name: json.loads((run_dir / b.out).read_text()) for b in BENCHES}
+    for name, out in EXTRAS.items():
+        data[name] = json.loads((run_dir / out).read_text()) if (run_dir / out).exists() else None
     m = run_dir / MANIFEST
     data["manifest"] = json.loads(m.read_text()) if m.exists() else {}
     return data
@@ -328,12 +333,15 @@ def serving_table(d: dict) -> str:
     return text
 
 
-def logits_section(d: dict) -> str:
+def logits_section(d: dict, torchnorm: dict | None = None) -> str:
+    """`torchnorm`: the same run with our RMSNorm forced to PyTorch (EXTRAS); adds its rows, labelled by norm."""
     rows = []
-    for phase in ("prefill", "decode"):
-        s = d["stats"][phase]
+    runs = [(d, "")] if torchnorm is None else [
+        (d, f", {(d.get('provenance') or {}).get('norm_backend', '?')} norm"), (torchnorm, ", torch norm")]
+    for (r, label), phase in [(x, p) for x in runs for p in ("prefill", "decode")]:
+        s = r["stats"][phase]
         flips = s["flips"]["ours_bf16"]
-        rows.append([phase, str(s["ours_vs_hf_bf16"]["positions"]),
+        rows.append([phase + label, str(s["ours_vs_hf_bf16"]["positions"]),
                      "yes" if s["bit_identical_to_hf_bf16"] else "no",
                      f"{s['ours_vs_hf_bf16']['max_abs']:.3g}",
                      f"{s['ours_bf16']['top1']:.2%}", f"{s['hf_bf16']['top1']:.2%}",
@@ -395,7 +403,7 @@ def run_header(data: dict) -> str:
     return "\n".join(lines)
 
 
-def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
+def render_results(data: dict, run_dir: str = "runs/bench/v1b") -> str:
     tl_gen = [(nm, lab) for nm, lab in TL_ENGINES]
     w = warnings(data)
     parts = [
@@ -415,7 +423,7 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
         "temperature, so each table ends with its heat line. ⚠ marks a hardware slowdown, or a thermal "
         f"slowdown with the busy clock median below {n(MIN_CLOCK_MHZ)} MHz.",
         "- **Elsewhere:** dated results and the reasoning behind each step are in "
-        "[INFERENCE.md](INFERENCE.md); ours vs vLLM vs llama.cpp under load (4.8a) is in "
+        "[INFERENCE.md](INFERENCE.md); ours vs vLLM vs llama.cpp under load (4.8a, rerun in 4.10c) is in "
         "[SERVING.md](SERVING.md).",
         "- **Reproduce:** `uv run python scripts/bench_all.py` re-renders this page and the README "
         "tables from the saved JSON in seconds, with no GPU. `--run --power-mode <mode>` reruns "
@@ -448,7 +456,7 @@ def render_results(data: dict, run_dir: str = "runs/bench/v1") -> str:
         serving_table(data["tl-serving"]), "", heat_line(data, ["tl-serving"]),
         "", "### Logits vs HF Transformers", "",
         "Ours (bf16) and HF Transformers (bf16, eager) against an fp32 HF reference, on the same prompts.",
-        "", logits_section(data["tl-logits"]), "", heat_line(data, ["tl-logits"]),
+        "", logits_section(data["tl-logits"], data.get("tl-logits-torchnorm")), "", heat_line(data, ["tl-logits"]),
         "", "## Our 30M model (bf16 weights)", "",
         "### Decode by batch size and prompt length", "",
         f"256 new tokens, {repeats_note(data['30m-kv'])}. Ceiling: {ceiling_note(data['30m-kv'])}.", "",
@@ -534,11 +542,17 @@ def readme_blocks(data: dict) -> dict[str, str]:
     max_d = max(lg[p]["ours_vs_hf_bf16"]["max_abs"] for p in ("prefill", "decode"))
     positions = sum(lg[p]["ours_vs_hf_bf16"]["positions"] for p in ("prefill", "decode"))
     flips = [f for p in ("prefill", "decode") for f in lg[p]["flips"]["ours_bf16"]]
+    top1 = {p: lg[p]["ours_vs_hf_bf16"]["top1"] for p in ("prefill", "decode")}
+    tn = (data.get("tl-logits-torchnorm") or {}).get("stats")
+    torch_identical = bool(tn) and all(tn[p]["bit_identical_to_hf_bf16"] for p in ("prefill", "decode"))
+    gap_cause = (" The difference is our Triton RMSNorm (D-032): with the PyTorch norm the logits are "
+                 "bit-identical to HF's." if torch_identical else "")
 
     logits_hl = ("**Our engine's logits are bit-identical to HF Transformers** in bf16 on TinyLlama, "
                  "prefill and cached decode." if identical else
-                 f"**Our engine's bf16 logits match HF Transformers to within {max_d:.2g}** on TinyLlama, "
-                 "prefill and cached decode.")
+                 f"**Our engine's bf16 logits match HF Transformers to within {max_d:.2g}** on TinyLlama "
+                 f"(same top token at {top1['prefill']:.1%} of prefill and {top1['decode']:.1%} of cached-decode "
+                 "positions)." + gap_cause)
     highlights = "\n".join([
         img("docs/img/decode_b1.svg", b1_alt(data)),
         "",
@@ -575,7 +589,7 @@ def readme_blocks(data: dict) -> dict[str, str]:
     corr = (f"- **Correctness:** bf16 logits equal HF's bf16 logits exactly (`torch.equal`) at all {positions} "
             "test positions." if identical else
             f"- **Correctness:** bf16 logits differ from HF's bf16 logits by at most {max_d:.2g} over "
-            f"{positions} test positions.")
+            f"{positions} test positions." + gap_cause)
     corr += (f" Every top-1 disagreement with fp32 is a near-tie (margin ≤ {max(flips):.3f} logits)." if flips
              else " No top-1 disagreement with fp32.")
     tinyllama = "\n".join([

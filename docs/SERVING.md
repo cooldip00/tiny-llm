@@ -73,7 +73,28 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
   - **goodput**: the highest rate that still meets the latency target
   - behaviour past capacity (429s, queue wait)
 
+### Results: TinyLlama on three engines, rerun (4.10c, 2026-11-07)
+
+The 4.8a sweep below, rerun with the same client, prompts, settings, rates and engine builds, after RMSNorm switched to the Triton kernel (D-032), in the same session as the `runs/bench/v1b` tables. One engine on the GPU at a time, cooled to 60 °C before each. NitroSense Performance, fans Max, room fan overhead. Provenance: `runs/bench/load/4.10c/` (commit `3928889`); the plot data `docs/data/load_sweep.json` comes from it.
+
+| Setup | Seats | B=1 decode (% of ceiling) | Rated load | Saturation | ITL p50 / p99 at 4 req/s | Past saturation |
+|---|---|---|---|---|---|---|
+| ours, `--slots 8 --cuda-graph` | 8 | 119.6 tok/s (62.2%) | 4 req/s | ~5.9 req/s, ~760 tok/s | 9 / 37 ms | 429s (43% at 12, 60% at 16); TTFT p95 capped at ~5.6 s by the 32-place queue |
+| ours, `--slots 32 --cuda-graph` | 32 | (same engine) | 8 req/s | ≥ 13.0 req/s, 1,659 tok/s at 16 | 12.5 / 42 ms | 429s (15% at 16); TTFT p95 1.2 s at 12, 2.4 s at 16 |
+| vLLM 0.33, `--max-num-seqs 8` | 8 | 161.8 tok/s (84.1%) | 8 req/s (TTFT p95 0.95 s) | ~8.7 req/s, ~1,110 tok/s | 7 / 14 ms | no 429s; unbounded queue, TTFT p95 46 s at 16 req/s |
+| vLLM 0.33, default (256 seqs) | 256 | 161.0 tok/s (83.7%) | 32 req/s | ~34 req/s, ~4,410 tok/s | 7 / 9 ms | TTFT p95 20 s at 48 req/s |
+| llama.cpp `61d4472`, bf16 GGUF, `-np 8` | 8 | 153.4 tok/s (79.8%) | 4 req/s | peak 5.5 req/s at 6, then **falls** to 3.7 at 16 | 10 / 29 ms | no 429s; TTFT p95 188 s at 16 req/s |
+| llama.cpp, Q8_0 GGUF, `-np 8` | 8 | 236.2 tok/s (65.3% of 361.6) | 4 req/s | peak 6.5 req/s at 8, then falls to 4.3 at 16 | 9 / 27 ms | no 429s; TTFT p95 158 s at 16 req/s |
+
+What changed from 4.8a:
+- **Our one stream: 111.7 → 119.6 tok/s (+7%)**, the D-032 gain through the HTTP server. vLLM's lead goes from 1.44× to 1.35× and llama.cpp's from 1.35× to 1.28×; the other engines moved by under 2%.
+- **Rated loads are the same except vLLM at 8 seqs, 6 → 8 req/s.** That is the SLO edge, not a faster vLLM: its TTFT p95 at 8 req/s was 1.07 s in 4.8a and 0.95 s here, against a 1 s target, and its saturation moved by 2% (8.5 → 8.7 req/s). Read it as "6–8 req/s".
+- Our saturation with 8 slots rose ~7% (5.5 → 5.9 req/s), in line with the faster step; with 32 slots, 12.2 → 13.0 req/s.
+- **Caveat:** thermally throttled again (GPU max 83–86 °C, SM clock medians 1,575–1,875 MHz; one sweep, ours at 32 slots, also logged a hardware slowdown flag). Differences within ~15% are ties, so the comparison is unchanged: vLLM is faster per stream, seats set the capacity, and we bound latency with 429s.
+
 ### Results: TinyLlama on three engines (4.8a, 2026-11-06)
+
+Superseded by the 4.10c rerun above (kept as the pre-D-032 record).
 
 Same client (`scripts/load_test.py`), same 8 story prompts (14 tokens), `ignore_eos`, bf16 weights unless noted, NitroSense Performance mode. Prefix caching is off: vLLM `--no-enable-prefix-caching`, llama.cpp `--no-cache-prompt`; we don't have it.
 - **B=1:** 20 requests × 256 tokens, one at a time. Decode speed excludes the first token (prefill). Ceiling = 423 GB/s ÷ weight bytes: 192.3 tok/s for bf16, 361.6 tok/s for Q8_0.
