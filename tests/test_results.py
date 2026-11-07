@@ -105,11 +105,17 @@ def fake_run(tmp_path: Path) -> Path:
     for name, d in files.items():
         p = tmp_path / R.BY_NAME[name].out
         p.parent.mkdir(parents=True, exist_ok=True)
+        if name == "tl-int8-gemv":      # rerun from a later commit: must not reach the main Run line
+            d["provenance"] = {**d["provenance"], "git": {"commit": "9876543210", "dirty": False}}
         p.write_text(json.dumps(d))
+    later = {"rerun": True, "git": {"commit": "9876543210"}, "power_mode": "performance-fans-max"}
     (tmp_path / R.MANIFEST).write_text(json.dumps({
         "power_mode": "performance", "finished_utc": "2026-11-07T12:00",
-        "benches": {"tl-hf": {"rerun": False}, "tl-int8": {"rerun": True, "finished_utc": "2026-11-07T13:42:20+00:00",
-                                                           "start_temp_c": 49.0}}}))
+        "benches": {"tl-hf": {"rerun": False},
+                    "tl-int8": {"rerun": True, "finished_utc": "2026-11-07T13:42:20+00:00", "start_temp_c": 49.0,
+                                "git": {"commit": "abcdef1234"}, "power_mode": "performance"},
+                    "tl-int8-gemv": {**later, "finished_utc": "2026-11-08T06:49:00+00:00", "start_temp_c": 39.0},
+                    "tl-int8-graph": {**later, "finished_utc": "2026-11-08T07:26:00+00:00", "start_temp_c": 50.0}}}))
     return tmp_path
 
 
@@ -148,8 +154,11 @@ def test_render_results_from_one_run(tmp_path):
     assert "1,600 MHz (min 1,400), 80 °C, sw_power_cap" in page and "gpu_idle" not in page
     assert "None" not in page and "\n\n\n" not in page and "Throttling warnings" not in page
     assert "token 43 / token 43" in page and " ‡" in page                # 30M naive at P=512 slides its window
-    assert "**Rerun later with `--only`:** tl-int8 (finished 13:42 UTC, started at 49.0 °C)." in page
-    assert "tl-hf (" not in page
+    assert ("**Rerun later with `--only`:** 2026-11-07, commit `abcdef1`, NitroSense **performance**: "
+            "tl-int8 (finished 13:42 UTC, started at 49.0 °C); 2026-11-08, commit `9876543`, NitroSense "
+            "**performance-fans-max**: tl-int8-gemv (finished 06:49 UTC, started at 39.0 °C), "
+            "tl-int8-graph (finished 07:26 UTC, started at 50.0 °C).") in page
+    assert "tl-hf (" not in page and "⚠ 2 commits" not in page
 
 
 def test_readme_blocks_replace_only_inside_markers(tmp_path):

@@ -31,7 +31,7 @@ Decode speed at batch 1 with a 128-token prompt, 256 new tokens, median of 5 run
 
 - **Eager decode is host-bound.** At batch 1, HF and our eager engine take 22.6 and 20.8 ms per step (ours 20.5 ms at batch 32). The profiler shows the GPU idle 76% of an eager step, waiting for kernel launches. Capturing the decode step as a CUDA graph removes that overhead; the GPU is then idle 3% of the step.
 - **Batching:** with graphs, 814 tok/s at batch 8 and 1,984 tok/s at batch 32 (HF: 359 and 1,440).
-- **INT8 weights:** val loss +0.0010, 98.5% argmax agreement with bf16; decode is 0.75× bf16 at batch 1, 0.36× at batch 32. Slower, not faster: the weight is cast back to bf16 on every call, so each step moves more bytes, not fewer. A fused dequantize-and-multiply kernel fixes this; it's on the roadmap.
+- **INT8 weights:** val loss +0.0010, 98.5% argmax agreement with bf16. Our Triton kernel reads the int8 weight and dequantizes inside the matmul; with CUDA graphs, decode is 1.45× bf16 at batch 1 and 1.06× at batch 32. Casting the weight back to bf16 on every call (plain PyTorch) gives 0.39× and 0.52×: it moves more bytes than bf16, not fewer.
 - **Correctness:** bf16 logits equal HF's bf16 logits exactly (`torch.equal`) at all 415 test positions. Every top-1 disagreement with fp32 is a near-tie (margin ≤ 0.019 logits).
 
 ![Line chart, decode tok/s at batch 1, 8, 32: ours with CUDA graphs 127, 814, 1,984; HF Transformers 44, 359, 1,440; log scales, with the bandwidth ceiling times batch size](docs/img/batch_scaling.svg)

@@ -444,8 +444,37 @@ Decode tok/s (% of ceiling):
   - The eager rows here are ~9% below the table above (245 vs 272 at 8 slots, measured 2026-11-04). Eager is host-bound, so CPU speed and load move it. Compare within one run.
   - Same tokens as eager at both sizes: 22/64 and 32/64 requests identical to solo `generate()`, with the same first divergences.
 
+### 4.10b Triton INT8 kernel (2026-11-07)
+- **What:** `src/tinyllm/kernels/int8_gemv.py`, one Triton kernel computing `y = scale * (x @ q.T)` straight from the int8 weight. Each program owns a block of output columns and loops over K. It loads int8 tiles, converts them to bf16 in registers (exact, since |q| ≤ 127), runs `tl.dot` on tensor cores with fp32 accumulation, and applies the per-row scale once at the end. The rows (M = batch at decode) are padded to 16 for `tl.dot`; the wasted flops cost nothing next to the weight reads. Block sizes are autotuned per (N, K, M bucket), on warm-up, outside CUDA-graph capture.
+  - `Int8Linear(backend="triton")` uses it for M ≤ 64 on CUDA. Prefill (M > 64), CPU and fp32 stay on the PyTorch path, which casts the weight to bf16 on every call (three kernels: cast, matmul, scale).
+  - Tests: error against an fp64 reference is at most the PyTorch path's, on every TinyLlama shape, M 1–64; CUDA-graph replay; the fallbacks.
+- **Stop rule (PLAN):** int8 must beat bf16 at batch 1 with CUDA graphs on. **Passed** in the first session, 1.45×.
+- **Found on the way:** batch-32 int8 was a benchmark artifact, not the kernel. With every variant resident, int8 at batch 32 reserved ~8.7 GB on the 8 GB card and WSL spilled to host memory (TTFT 5.4–6.8 s vs 0.34 s bf16). `bench_quant` now keeps only the timed variant's weights on the GPU (`timed_alone` in the JSON). Batch 32 timed alone: bf16 2,106 / int8 1,080 / int8-triton 2,222 tok/s. The old `tl-int8` v1 number (int8 0.36× bf16 at batch 32) had the same spill.
+- **Final session** (`bench_all --only tl-int8-gemv,tl-int8,tl-int8-graph`, commit `2fdd1dc`, NitroSense performance, fans Max, each job started ≤ 50 °C; all three tables in [RESULTS.md](RESULTS.md)):
+  - **The matmuls alone** (`bench_int8_gemv`, all 155 Linears of one decode step, CUDA-graph replays over weight copies larger than L2):
+
+    | Rows | bf16 ms | PyTorch int8 ms | Triton ms | Triton vs bf16 |
+    |---|---|---|---|---|
+    | 1 | 5.67 | 16.66 | 3.04 | 1.87× |
+    | 32 | 6.74 | 17.75 | 3.75 | 1.80× |
+    | 64 | 6.15 | 17.62 | 6.25 | 0.99× |
+
+    At 1 row, bf16 reads 1,975 MiB at 86% of the measured 423 GB/s; the Triton kernel reads 991 MiB at 81%. The large layers (gate/up, down, lm_head) reach 89–96%. At 64 rows the tile becomes compute-bound and the gain is gone, which is why prefill stays on cuBLAS.
+  - **End to end, CUDA graphs** (`bench_quant --engine kv-graph --triton`, decode tok/s, median of 3 interleaved rounds):
+
+    | Batch | bf16 | int8 (PyTorch) | int8-triton | triton vs bf16 |
+    |---|---|---|---|---|
+    | 1 | 128 | 50 | 186 | **1.45×** |
+    | 8 | 839 | 355 | 1,063 | **1.27×** |
+    | 32 | 2,053 | 1,064 | 2,175 | **1.06×** |
+
+    Quality is the same for both int8 paths: val loss +0.0010 vs bf16, argmax agreement 98.49%. Heat: ⚠ hardware slowdown flags seen, busy clock median 1,545 MHz, 85 °C. The numbers match the first session (B=1 186, B=8 1,080) and the cooler batch-32-alone run (1.05×) within 3%, so they were kept.
+  - **Eager** (`tl-int8`, no graphs, PyTorch path only): int8 is 0.74–0.75× bf16 at every batch size; at batch 32, 1,085 tok/s, up from 533 before the spill fix.
+- **Known gap:** int8 TTFT is 10–130 ms above bf16 (batch 1 to 32), because prefill uses the PyTorch cast path. A Triton GEMM for prefill is out of scope (Triton is capped at one day, D-016).
+- **Why it gains less at batch 32:** the matmuls are 5.7 of bf16's 7.8 ms step at batch 1 (73%) but 6.7 of 15.6 ms at batch 32 (43%); the rest is attention over the KV cache and the other ops. At batch 1 the step saves 2.4 ms, close to the 2.6 ms the matmul bench predicts. At batch 32 it saves 0.9 ms of a predicted 3.0 ms; that gap is not explained yet.
+
 ## Results: Triton kernels (fill in)
 | Kernel | Shape | PyTorch time | Triton time | Achieved GB/s | % of peak | End-to-end tok/s Δ |
 |---|---|---|---|---|---|---|
 | Fused RMSNorm + residual | | | | | | |
-| INT8 GEMV (decode) | | | | | | |
+| INT8 GEMV (decode) | 155 Linears of one TinyLlama decode step, 1 row | 16.66 ms (cast + matmul); bf16 5.67 ms | 3.04 ms | 342 | 81% of 423 GB/s | 1.45× bf16 at batch 1 (186 vs 128 tok/s, graphs); 3.7× the PyTorch int8 path |

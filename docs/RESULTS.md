@@ -6,14 +6,14 @@ Every number on this page comes from **one** run of `scripts/bench_all.py --run`
 
 - **Run:** 2026-11-06T11:29:34+00:00 → 2026-11-06T12:57:45+00:00 UTC, commit `a765817`, NitroSense **performance**.
 - **Machine:** NVIDIA GeForce RTX 3070 Ti Laptop GPU, driver 610.91, torch 2.14.1+cu130, CUDA 13.0.
-- **Rerun later with `--only`:** 30m-serving (finished 13:20 UTC, started at 43.0 °C), tl-int8 (finished 13:42 UTC, started at 50.0 °C). Every other benchmark is from the run above.
+- **Rerun later with `--only`:** 2026-11-06, commit `a765817`, NitroSense **performance**: 30m-serving (finished 13:20 UTC, started at 43.0 °C); 2026-11-07, commit `2fdd1dc`, NitroSense **performance-fans-max-room-fan-overhead**: tl-int8-gemv (finished 06:49 UTC, started at 39.0 °C), tl-int8 (finished 07:08 UTC, started at 49.0 °C), tl-int8-graph (finished 07:26 UTC, started at 50.0 °C). Every other benchmark is from the run above.
 - **How to read it:** ratios between rows of one table are the reliable result; they share a session and its heat. Absolute tok/s on this laptop moves 10–20% between sessions with temperature, so each table ends with its heat line. ⚠ marks a hardware slowdown, or a thermal slowdown with the busy clock median below 1,400 MHz.
 - **Elsewhere:** dated results and the reasoning behind each step are in [INFERENCE.md](INFERENCE.md); ours vs vLLM vs llama.cpp under load (4.8a) is in [SERVING.md](SERVING.md).
 - **Reproduce:** `uv run python scripts/bench_all.py` re-renders this page and the README tables from the saved JSON in seconds, with no GPU. `--run --power-mode <mode>` reruns everything (~1.5–2 h); `--only <bench>` reruns one benchmark.
 
 **⚠ Throttling warnings:**
 - 30m-serving: busy clock median 1268 MHz < 1400 -> consider scripts/bench_all.py --only 30m-serving
-- tl-int8: hw_slowdown, hw_thermal_slowdown -> consider scripts/bench_all.py --only tl-int8
+- tl-int8-graph: hw_slowdown, hw_thermal_slowdown -> consider scripts/bench_all.py --only tl-int8-graph
 
 ## TinyLlama 1.1B (bf16)
 
@@ -51,20 +51,55 @@ Decode tok/s, with the % of the bandwidth ceiling at that batch size. — = skip
 
 ![Line chart, decode tok/s at batch 1, 8, 32: ours with CUDA graphs 127, 814, 1,984; HF Transformers 44, 359, 1,440; log scales, with the bandwidth ceiling times batch size](img/batch_scaling.svg)
 
-### INT8 weights (per-row, cast back to bf16 per call)
+### INT8 weights (per-row scales)
+
+Two ways to run an int8 matmul: `int8` casts the weight back to bf16 on every call (plain PyTorch); `int8-triton` is our Triton kernel, which reads the int8 weight and dequantizes in registers (4.10b).
+
+#### Eager decode (KV cache, no graphs)
 
 | Batch | bf16 tok/s | int8 tok/s | int8 / bf16 |
 |---|---|---|---|
-| 1 | 46 | 35 | 0.75× |
-| 8 | 374 | 279 | 0.75× |
-| 32 | 1,482 | 533 | 0.36× |
+| 1 | 45 | 34 | 0.74× |
+| 8 | 362 | 271 | 0.75× |
+| 32 | 1,456 | 1,085 | 0.75× |
 
 - Weights: bf16 2,098 MiB, int8 1,113 MiB.
 - Val loss: bf16 1.6283, int8 1.6293 (int8 +0.0010 vs bf16).
 - Teacher-forced on bf16's greedy tokens: argmax agreement bf16 100.00%, int8 98.49% (median top-1 margin 2.00).
 - Greedy rows identical to bf16: bf16 8/8, int8 0/8.
 
-_Heat (busy SM clock median, peak GPU temperature, throttle reasons): tl-int8: ⚠ 1,860 MHz (min 420), 86 °C, sw_power_cap + hw_slowdown + sw_thermal_slowdown + hw_thermal_slowdown._
+_Heat (busy SM clock median, peak GPU temperature, throttle reasons): tl-int8: 1,860 MHz (min 300), 85 °C, sw_power_cap + sw_thermal_slowdown._
+
+#### With CUDA graphs: PyTorch path vs Triton kernel
+
+Each variant is timed with only its own weights on the GPU.
+
+| Batch | bf16 tok/s | int8 tok/s | int8-triton tok/s | int8 / bf16 | int8-triton / bf16 |
+|---|---|---|---|---|---|
+| 1 | 128 | 50 | 186 | 0.39× | 1.45× |
+| 8 | 839 | 355 | 1,063 | 0.42× | 1.27× |
+| 32 | 2,053 | 1,064 | 2,175 | 0.52× | 1.06× |
+
+- Weights: bf16 2,098 MiB, int8 1,113 MiB, int8-triton 1,113 MiB.
+- Val loss: bf16 1.6283, int8 1.6293, int8-triton 1.6293 (int8 +0.0010, int8-triton +0.0010 vs bf16).
+- Teacher-forced on bf16's greedy tokens: argmax agreement bf16 100.00%, int8 98.49%, int8-triton 98.49% (median top-1 margin 2.00).
+- Greedy rows identical to bf16: bf16 8/8, int8 0/8, int8-triton 0/8.
+
+_Heat (busy SM clock median, peak GPU temperature, throttle reasons): tl-int8-graph: ⚠ 1,545 MHz (min 330), 85 °C, sw_power_cap + hw_slowdown + sw_thermal_slowdown + hw_thermal_slowdown._
+
+#### The matmuls alone
+
+| Rows (batch) | bf16 ms | PyTorch int8 ms | Triton int8 ms | Triton vs bf16 | Triton vs PyTorch int8 |
+|---|---|---|---|---|---|
+| 1 | 5.67 | 16.66 | 3.04 | 1.87× | 5.5× |
+| 8 | 5.81 | 16.98 | 3.09 | 1.88× | 5.5× |
+| 16 | 5.87 | 17.07 | 3.14 | 1.87× | 5.4× |
+| 32 | 6.74 | 17.75 | 3.75 | 1.80× | 4.7× |
+| 64 | 6.15 | 17.62 | 6.25 | 0.99× | 2.8× |
+
+Time for every matmul of one decode step (the 155 Linears), replayed in CUDA graphs over weight copies larger than the L2 cache, so each call reads its weight from memory. At 1 row, a step must read 1,975 MiB of bf16 weights or 991 MiB of int8 weights and scales: bf16 runs at 86% of the measured 423 GB/s, the Triton kernel at 81%. PyTorch int8 casts each weight back to bf16 first, so it moves more bytes than bf16, not fewer.
+
+_Heat (busy SM clock median, peak GPU temperature, throttle reasons): tl-int8-gemv: 1,792 MHz (min 1,260), 81 °C, sw_power_cap + sw_thermal_slowdown._
 
 ### Serving: static vs continuous batching, with and without CUDA graphs
 

@@ -340,7 +340,9 @@ def profile_table(profiles: list[tuple[str, dict]]) -> str:
 
 def run_header(data: dict) -> str:
     m = data["manifest"]
-    provs = [data[b.name].get("provenance") or {} for b in BENCHES]
+    rec = m.get("benches") or {}
+    # the Run line describes the main run only; --only reruns get their own line, grouped by session
+    provs = [data[b.name].get("provenance") or {} for b in BENCHES if not (rec.get(b.name) or {}).get("rerun")]
     commits = sorted({(p.get("git") or {}).get("commit") or "?" for p in provs})
     dirty = any((p.get("git") or {}).get("dirty") for p in provs)
     first = next((p for p in provs if p.get("gpu_name")), {})
@@ -353,11 +355,17 @@ def run_header(data: dict) -> str:
         f"- **Machine:** {first.get('gpu_name', '?')}, driver {first.get('driver', '?')}, "
         f"torch {first.get('torch', '?')}, CUDA {first.get('cuda', '?')}.",
     ]
-    reruns = [(n, r) for n, r in (m.get("benches") or {}).items() if r.get("rerun")]
-    if reruns:
-        lines.append("- **Rerun later with `--only`:** " + ", ".join(
-            f"{n} (finished {str(r.get('finished_utc', '?'))[11:16]} UTC, started at {r.get('start_temp_c', '?')} °C)"
-            for n, r in reruns) + ". Every other benchmark is from the run above.")
+    sessions: dict[tuple, list[str]] = {}
+    for n, r in sorted(rec.items(), key=lambda kv: str(kv[1].get("finished_utc", ""))):
+        if r.get("rerun"):
+            fin = str(r.get("finished_utc", "?"))
+            key = (fin[:10], ((r.get("git") or {}).get("commit") or "?")[:7], r.get("power_mode") or "not recorded")
+            sessions.setdefault(key, []).append(
+                f"{n} (finished {fin[11:16]} UTC, started at {r.get('start_temp_c', '?')} °C)")
+    if sessions:
+        lines.append("- **Rerun later with `--only`:** " + "; ".join(
+            f"{day}, commit `{c}`, NitroSense **{mode}**: {', '.join(names)}"
+            for (day, c, mode), names in sessions.items()) + ". Every other benchmark is from the run above.")
     return "\n".join(lines)
 
 
