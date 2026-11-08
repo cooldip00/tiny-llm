@@ -179,7 +179,7 @@ function dur(s) {
 const minLabel = (ago) => ago === 0 ? "this minute" : `${ago} min ago`;
 
 /* One chart: x in minutes from -60 to 0; series of {name, color, values: [{x, y}|null...]}.
-   kind "stack": columns, one per minute; kind "line": 2px lines with an end dot. */
+   kind "stack": columns, one per minute; kind "line": 2px lines with an end dot, and a dot on lone points. */
 function drawChart(svg, spec) {
   const W = svg.clientWidth || 600, H = svg.clientHeight || 190;
   const m = { l: 44, r: 14, t: 10, b: 24 };
@@ -225,15 +225,23 @@ function drawChart(svg, spec) {
     }
   } else {
     for (const s of spec.series) {
-      let d = "", lastPt = null, prev = null;
+      // A point with no neighbour on either side is a lone "M" (zero length, never drawn),
+      // so each such point gets its own small dot; sparse traffic makes most minutes like that.
+      let d = "", lastPt = null, prev = null, run = [];
+      const lone = [];
+      const endRun = () => { if (run.length === 1) lone.push(run[0]); run = []; };
       for (const p of spec.points) {
         const v = p ? s.get(p) : null;
-        if (v === null || v === undefined) { prev = null; continue; }
+        if (v === null || v === undefined) { endRun(); prev = null; continue; }
         const gapBreak = prev && p.x - prev.x > (spec.maxGap || 1.01);
-        d += `${prev && !gapBreak ? "L" : "M"}${X(p.x).toFixed(1)},${Y(v).toFixed(1)} `;
-        prev = p; lastPt = [X(p.x), Y(v)];
+        if (!prev || gapBreak) endRun();
+        const pt = [X(p.x), Y(v)];
+        d += `${prev && !gapBreak ? "L" : "M"}${pt[0].toFixed(1)},${pt[1].toFixed(1)} `;
+        run.push(pt); prev = p; lastPt = pt;
       }
+      endRun();
       if (d) el("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+      for (const q of lone) if (q !== lastPt) el("circle", { cx: q[0], cy: q[1], r: 3, fill: s.color }, svg);
       if (lastPt) el("circle", { cx: lastPt[0], cy: lastPt[1], r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2 }, svg);
     }
   }
