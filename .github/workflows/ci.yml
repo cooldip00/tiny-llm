@@ -44,6 +44,7 @@ jobs:
   # 6.5b (D-028 amendment): build the Space's Docker image (CPU only, D-033), serve a tiny random
   # model in the 4.8b export format, and smoke-check it with the same script used on the Space.
   docker:
+    needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
