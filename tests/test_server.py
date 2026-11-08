@@ -20,7 +20,8 @@ from tinyllm.engine import ContinuousEngine
 from tinyllm.generate import generate
 from tinyllm.model import Transformer
 from tinyllm.obs import Metrics
-from tinyllm.server import EngineWorker, Faults, ServerConfig, Variant, cpu_limit, create_app, forwarded_ip, resolve_salt
+from tinyllm.server import EngineWorker, Faults, ServerConfig, Variant, cpu_limit, create_app, resolve_salt
+from tinyllm.web_common import forwarded_ip
 
 CFG = ModelConfig(vocab_size=128, max_seq_len=48, d_model=64, n_layers=3, n_heads=4, ffn_hidden=160)
 PROMPT = [5, 17, 99, 3, 42, 8]
@@ -241,6 +242,26 @@ def test_spoofed_forwarded_for_cannot_dodge_the_rate_limit(model):
         # one visitor (1.1.1.1, appended by the proxy) faking a new address each time
         assert [post(f"6.6.6.{i}, 1.1.1.1") for i in range(3)] == [200, 200, 429]
         assert post("2.2.2.2") == 200                                    # another visitor has its own bucket
+
+
+def test_router_header_is_ignored_by_default(model):
+    """The public Space runs this image: a visitor must not be able to pick their own identity."""
+    with serve(model, rate_per_min=60, rate_burst=2) as s:
+        def post(i):
+            return s.client.post("/v1/completions", json=greedy(max_tokens=2),
+                                 headers={"x-tinyllm-client": f"{i:016x}"}).status_code
+        assert [post(i) for i in range(3)] == [200, 200, 429]
+
+
+def test_trust_router_takes_the_visitor_hash_from_the_header(model):
+    with serve(model, rate_per_min=60, rate_burst=1, trust_router=True) as s:
+        def post(value):
+            return s.client.post("/v1/completions", json=greedy(max_tokens=2),
+                                 headers={"x-tinyllm-client": value}).status_code
+        assert [post("a" * 16), post("a" * 16)] == [200, 429]            # one visitor, one bucket
+        assert post("b" * 16) == 200                                     # another visitor
+        assert post("not a hash") == 200                                 # malformed: falls back to the address...
+        assert post("A" * 16) == 429                                     # ...and shares that one bucket
 
 
 def test_cpu_limit(tmp_path, monkeypatch):

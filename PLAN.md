@@ -252,6 +252,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
       - Load test through the router: goodput with 1 vs 2 replicas, labelled a routing demo.
       - Before creating them: read Hugging Face's terms on several Spaces serving one app.
       - If late, cut first the 1-vs-2 load test, then move the router and replicas to v1.1.
+      - _Stage 1 done 2026-11-08: router code, CPU tests against fake replicas, real end-to-end run on the laptop CPU (docs/SERVING.md "Built so far"). Open: stage 2 (create the Spaces and the router token), stage 3 (1-vs-2 load test)._
   - [ ] 6.5c W&B project set to public; link the training curves from the README
   - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume
   - [ ] 6.5e LinkedIn: three posts, one per milestone (training done → KV cache + paged KV → TinyLlama results)

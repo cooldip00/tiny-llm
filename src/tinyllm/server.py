@@ -46,12 +46,9 @@ import logging
 import math
 import os
 import queue
-import re
-import secrets
 import subprocess
 import threading
 import time
-import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -66,7 +63,9 @@ from pydantic import BaseModel, Field
 
 from tinyllm.engine import ContinuousEngine, Request, Sampling
 from tinyllm.model import norm_backend
-from tinyllm.obs import EngineSnapshot, Metrics, RequestRecord, hash_client, itl_stats, setup_logging
+from tinyllm.obs import EngineSnapshot, Metrics, RequestRecord, itl_stats, setup_logging
+from tinyllm.web_common import (CLIENT_HEADER, HeadersMiddleware, RateLimiter, client_hash, error_response, read_page,
+                                resolve_salt, router_client)
 
 log = logging.getLogger("tinyllm.server")
 
@@ -380,30 +379,6 @@ class Router:
         return self.primary
 
 
-class RateLimiter:
-    """Token bucket per client: `per_min` requests per minute, bursts up to `burst`.
-    Called from the event loop only. per_min <= 0 disables it."""
-
-    def __init__(self, per_min: float, burst: int):
-        self.rate = per_min / 60.0
-        self.burst = max(1, burst)
-        self._b: dict[str, tuple[float, float]] = {}
-
-    def check(self, client: str, now: float) -> float:
-        """0 if allowed (and counted), else seconds until the next request is allowed."""
-        if self.rate <= 0:
-            return 0.0
-        tokens, last = self._b.get(client, (float(self.burst), now))
-        tokens = min(float(self.burst), tokens + (now - last) * self.rate)
-        if tokens >= 1.0:
-            self._b[client] = (tokens - 1.0, now)
-            if len(self._b) > 10_000:                     # forget clients whose bucket is full again
-                self._b = {k: v for k, v in self._b.items() if v[0] + (now - v[1]) * self.rate < self.burst}
-            return 0.0
-        self._b[client] = (tokens, now)
-        return (1.0 - tokens) / self.rate
-
-
 # -- HTTP layer -------------------------------------------------------------------------
 
 class CompletionRequest(BaseModel):
@@ -428,51 +403,14 @@ class ServerConfig:
     slow_s: float = 10.0                 # requests slower than this log their timeline (warning)
     trust_proxy: bool = False            # take the client IP from X-Forwarded-For (HF Space)
     proxy_hops: int = 1                  # with trust_proxy: trusted proxies in front, each appending to it
+    trust_router: bool = False           # take the visitor hash from the router's header (private replicas only)
     salt: str | None = None              # client-hash salt; None = resolve_salt()'s order
     snapshot_s: float = 5.0
     drain_s: float = 30.0
 
 
-_RID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-
-
-class HeadersMiddleware:
-    """Pure ASGI (keeps streaming and disconnects intact): every response gets X-Request-ID
-    (the client's, if it sent a sane one) and X-Model-Version."""
-
-    def __init__(self, app, default_version: str):
-        self.app = app
-        self.default_version = default_version
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            return await self.app(scope, receive, send)
-        incoming = dict(scope.get("headers") or []).get(b"x-request-id", b"").decode("latin-1")
-        rid = incoming if _RID.match(incoming) else uuid.uuid4().hex[:16]
-        state = scope.setdefault("state", {})
-        state["request_id"] = rid
-
-        async def send_with_headers(msg):
-            if msg["type"] == "http.response.start":
-                version = state.get("model_version", self.default_version)
-                msg = {**msg, "headers": [*msg.get("headers", []), (b"x-request-id", rid.encode()),
-                                          (b"x-model-version", version.encode())]}
-            await send(msg)
-
-        await self.app(scope, receive, send_with_headers)
-
-
 class _ClientGone(Exception):
     pass
-
-
-WEB = Path(__file__).resolve().parent / "web"
-
-
-def _page(name: str) -> str:
-    """The demo and status pages (6.5b): static HTML + JS in src/tinyllm/web, read per request
-    (small) so an edit shows on reload. They fetch the JSON endpoints with relative URLs."""
-    return (WEB / name).read_text(encoding="utf-8")
 
 
 def decode_completion(tok: Tokenizer, ids: list[int], context: list[int]) -> str:
@@ -507,35 +445,6 @@ class _Detokenizer:
             return ""
         d, self.sent = text[len(self.sent):], text
         return d
-
-
-def forwarded_ip(xff: str, hops: int = 1) -> str | None:
-    """The client's address in an X-Forwarded-For header behind `hops` trusted proxies.
-
-    Each proxy appends the address the request came from, so only the last `hops` entries
-    are trustworthy; anything left of them is whatever the client sent (spoofable, so never
-    the leftmost). With fewer entries than hops, all came from proxies: take the leftmost.
-    """
-    parts = [p.strip() for p in xff.split(",") if p.strip()]
-    if not parts:
-        return None
-    return parts[-hops] if len(parts) >= hops else parts[0]
-
-
-def resolve_salt(salt: str | None = None) -> tuple[str, str]:
-    """(salt, where it came from) for the client hash. The source is logged, never the salt.
-
-    Order: an explicit salt; $TINYLLM_LOG_SALT (a Space secret, the same value in every
-    replica Space, D-031); a hash of $SPACE_SIGNING_SECRET (HF's per-Space secret, stable
-    across restarts, but different in each Space); else random per start.
-    """
-    if salt:
-        return salt, "config"
-    if s := os.environ.get("TINYLLM_LOG_SALT"):
-        return s, "TINYLLM_LOG_SALT"
-    if s := os.environ.get("SPACE_SIGNING_SECRET"):
-        return hashlib.sha256(f"tinyllm-log-salt:{s}".encode()).hexdigest(), "SPACE_SIGNING_SECRET"
-    return secrets.token_hex(16), "random"
 
 
 def cpu_limit(cgroup: str = "/sys/fs/cgroup") -> int | None:
@@ -579,10 +488,9 @@ class Server:
         self.started = False
 
     def client_id(self, request: HTTPRequest) -> str:
-        ip = request.client.host if request.client else "unknown"
-        if self.cfg.trust_proxy and (xff := request.headers.get("x-forwarded-for")):
-            ip = forwarded_ip(xff, self.cfg.proxy_hops) or ip
-        return hash_client(ip, self.salt)
+        if self.cfg.trust_router and (client := router_client(request.headers.get(CLIENT_HEADER))):
+            return client
+        return client_hash(request, self.cfg.trust_proxy, self.cfg.proxy_hops, self.salt)
 
     def record(self, rec: RequestRecord, timeline: dict | None = None) -> None:
         self.metrics.observe(rec)
@@ -597,12 +505,7 @@ class Server:
         rec.status, rec.error = status, message
         rec.finish_reason = rec.finish_reason or ("timeout" if status == 504 else "error")
         self.record(rec)
-        return _error_response(status, message, err_type, headers)
-
-
-def _error_response(status: int, message: str, err_type: str, headers: dict | None = None) -> JSONResponse:
-    return JSONResponse({"error": {"message": message, "type": err_type, "code": status}},
-                        status_code=status, headers=headers)
+        return error_response(status, message, err_type, headers)
 
 
 def _finish_record(rec: RequestRecord, job: Job, times: list[float], toks: list[int]) -> dict:
@@ -703,11 +606,11 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
 
     @app.get("/", response_class=HTMLResponse)
     async def demo_page():
-        return HTMLResponse(_page("demo.html"))
+        return HTMLResponse(read_page("demo.html"))
 
     @app.get("/status", response_class=HTMLResponse)
     async def status_page():
-        return HTMLResponse(_page("status.html"))
+        return HTMLResponse(read_page("status.html"))
 
     @app.get("/metrics")
     async def prometheus():
@@ -716,7 +619,7 @@ def create_app(variants: list[Variant], cfg: ServerConfig | None = None,
     @app.get("/debug/state")
     async def debug_state(request: HTTPRequest):
         if not request.client or request.client.host not in ("127.0.0.1", "::1"):
-            return _error_response(404, "not found", "not_found")
+            return error_response(404, "not found", "not_found")
         return {v.name: await v.worker.debug_state() for v in variants}
 
     @app.post("/v1/completions")
@@ -973,6 +876,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--slo-ttft-s", type=float, default=1.0,
                    help="TTFT SLO threshold on /status (SERVING.md: 1 s local GPU, 2 s on the Space)")
     p.add_argument("--trust-proxy", action="store_true", help="client IP from X-Forwarded-For")
+    p.add_argument("--trust-router", action="store_true",
+                   help="visitor hash from the router's header; only for a private replica behind the router (D-031)")
     p.add_argument("--threads", type=int, default=None,
                    help="CPU only: torch threads; default the container's CPU limit (cpu_limit), else torch's")
     p.add_argument("--proxy-hops", type=int, default=1,
@@ -1016,6 +921,7 @@ def main(argv: list[str] | None = None) -> None:
                                                "load_s": round(time.perf_counter() - t, 2)}})
     cfg = ServerConfig(max_queue=args.max_queue, timeout_s=args.timeout, rate_per_min=args.rate_limit,
                        rate_burst=args.rate_burst, slow_s=args.slow_s, trust_proxy=args.trust_proxy,
+                       trust_router=args.trust_router,
                        proxy_hops=args.proxy_hops, drain_s=args.drain_s)
     metrics = Metrics(slo_ttft_s=args.slo_ttft_s)
     worker = EngineWorker(engine, metrics, cfg.max_queue, cfg.snapshot_s, name=name)

@@ -1381,6 +1381,7 @@ source = { editable = "." }
 dependencies = [
     { name = "datasets" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "numpy" },
     { name = "tokenizers" },
     { name = "torch" },
@@ -1390,7 +1391,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "matplotlib" },
     { name = "pytest" },
     { name = "transformers" },
@@ -1400,6 +1400,7 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=5.1.0" },
     { name = "fastapi", specifier = ">=0.162.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "numpy" },
     { name = "tokenizers", specifier = ">=0.23.3" },
     { name = "torch", specifier = "==2.14.1", index = "https://download.pytorch.org/whl/cu130" },
@@ -1409,7 +1410,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "pytest" },
     { name = "transformers", specifier = ">=5.22.1" },

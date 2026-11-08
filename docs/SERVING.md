@@ -230,7 +230,7 @@ Common to both:
 
 ## Scaling beyond one server (6.5b step 5 item 7; D-031 builds the router)
 
-This section is a design: the router is not built yet. The measurements in it are the capacity figures (laptop) and the "What we tested" table (HF).
+The router code exists and is tested on the laptop (`src/tinyllm/router.py`, see "Built so far"), but it is **not deployed yet**: the public demo is still one Space. The measurements in this section are the capacity figures (laptop) and the "What we tested" table (HF).
 
 ### One replica's capacity
 
@@ -309,9 +309,11 @@ visitor ──▶ router Space (public) ──HTTPS + token──▶ replica Spa
 | 503 JSON from our server | Starting, draining or engine failed | Not eligible; keep polling |
 | 503 `text/html`, "space is paused" | Paused (for sleep: to be confirmed 2026-11-10) | Not eligible; wake if traffic needs it |
 | 502, connection error or timeout | Starting or down | Not eligible; keep polling |
-| 404 `text/html` | Token or URL is wrong: a config bug | Not eligible; never wake; log an error; show it on the status page |
+| 404 `text/html`, or any 401 / 403 | Token or URL is wrong: a config bug | Not eligible; never wake; log an error; show it on the status page |
+| Any other HTML or non-JSON page (even a 200), or a 3xx | Not from our server. Redirects are never followed, so the token can't be sent elsewhere | Not eligible; keep polling |
 | 429 JSON, `server_busy` | Queue full | One retry on another ready replica |
 | 429 JSON, `rate_limit_error` | Should not happen (the limit is at the router) | Pass it to the visitor |
+| Any other JSON reply (e.g. a 400) | Our server's answer to this request | Pass it to the visitor |
 
 **Choosing a replica**
 - Shortest queue: fewest `outstanding` from the last poll plus the requests the router has sent there since. Ties go round-robin. The router's own count matters because a poll can be 5 s old.
@@ -321,6 +323,7 @@ visitor ──▶ router Space (public) ──HTTPS + token──▶ replica Spa
 **Waking**
 - A request never waits on a waking replica: 35 s is longer than a visitor will wait. If no replica is ready, the visitor gets a 503 with `Retry-After`, and the demo page says it is waking up.
 - A wake runs in the background and only for real visitor traffic: when no replica is ready, or when the ready ones are shedding load and another is asleep. At most one wake per replica per 5 minutes.
+- Every paused replica is woken, not just one. Only a paused replica is restarted: restarting a running Space would kill its requests.
 
 **Visitors and limits**
 - The rate limit (20/min, burst 5) and the visitor hash move to the router. HF's proxy adds the visitor's address to `X-Forwarded-For`; the router reads it with `--trust-proxy` and hashes it with `TINYLLM_LOG_SALT`.
@@ -331,6 +334,21 @@ visitor ──▶ router Space (public) ──HTTPS + token──▶ replica Spa
 **SLOs**
 - The SLOs visitors see are measured at the router: arrival at the router → token sent, including retries and the extra hop. A "waking up" 503 counts against availability, because that's what the visitor got.
 - The status page also shows each replica's state and queue from the last poll, or "not polled" when there is no traffic.
+
+### Built so far (D-031 stage 1, 2026-11-08)
+
+Built: `python -m tinyllm.router --replica name=url[,owner/space] ...` with the reply table, shortest-queue choice, one retry, polling only while visitors are active, waking, the rate limit and visitor hash, and the demo and status pages. The status page's Replicas panel appears only behind the router. The replica token is read only from `$TINYLLM_REPLICA_TOKEN`; there is no flag for it. Pages, `/stats`, `/health` and `/ready` never poll or wake anything, so an open status tab can't keep the replicas awake.
+
+Tested:
+- CPU tests against fake replicas (`tests/test_router.py`).
+- Router + 2 real CPU servers on the laptop, no token: `scripts/smoke_server.py` passed through the router; streaming ended in `[DONE]`; 12 concurrent requests all succeeded and split 6 / 6. After `kill -9` of one replica, the next 8 requests and 1 stream succeeded through a retry, and `/stats` showed it down with capacity halved. Restarted, it came back to ready by itself. With both gone, visitors got a 503 with `Retry-After` at once.
+
+Behaviour worth knowing:
+- A replica whose `/ready` is 200 but whose `/stats` can't be read stays ready and keeps its last load figures.
+- With no replica ready the status page's load chart shows a gap, not zero.
+- A clean stop on SIGTERM exits with -15: uvicorn finishes shutting down, then re-raises the signal. The last log line is `stopped`.
+
+Not done yet: the replica Spaces, the router Space and its token, waking against real Spaces, and the 1-vs-2 load test. The router image must install `huggingface_hub` itself, because here it only comes in through `tokenizers`.
 
 ### Autoscaling and capacity (not built)
 

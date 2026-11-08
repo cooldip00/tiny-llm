@@ -90,6 +90,12 @@ footer { color: var(--ink-2); font-size: 13px; margin-top: 28px; }
   <section class="cards" id="cards" aria-label="Service level objectives"></section>
   <p class="window" id="window"></p>
 
+  <section class="panel" id="replicas-panel" hidden>
+    <h2>Replicas</h2>
+    <p class="sub">State and queue from the last poll. The router polls only while visitors are active, so with no traffic this says "Not polled".</p>
+    <div class="tablewrap"><table id="replicas"></table></div>
+  </section>
+
   <section class="panel">
     <h2>Requests per minute</h2>
     <p class="sub">Last 60 minutes, by outcome</p>
@@ -335,6 +341,7 @@ function render(d) {
   document.getElementById("meta").textContent =
     `${v[1].version || v[0]} · norm ${v[1].norm_backend || "?"} · ${v[1].n_slots || "?"} slots · up ${dur(d.uptime_s)}`;
   renderCards(d);
+  renderReplicas(d);
   const mins = d.minutes.map((p) => p.covered ? { ...p, x: -p.minutes_ago } : null);
   const threshold = d.slo.ttft.threshold_s;
   document.getElementById("ref-label").textContent = `SLO: first token ≤ ${secs(threshold)}`;
@@ -366,6 +373,32 @@ function render(d) {
     series: [{ name: "Busy slots", color: "var(--s1)", get: (p) => p.busy_slots },
              { name: "Waiting in queue", color: "var(--s2)", get: (p) => p.queue_len }] });
   renderTable(d);
+}
+
+const REPLICA_STATES = {
+  ok: ["good", "✓", "Ready"], not_ready: ["warn", "!", "Starting"], asleep: ["none", "–", "Asleep"],
+  down: ["bad", "✕", "Down"], misconfigured: ["bad", "✕", "Misconfigured"],
+};
+
+/* Only the router sends `replicas`; on a single server this panel stays hidden. */
+function renderReplicas(d) {
+  const panel = document.getElementById("replicas-panel");
+  panel.hidden = !d.replicas;
+  if (!d.replicas) return;
+  const t = document.getElementById("replicas");
+  t.replaceChildren();
+  const head = h("tr");
+  for (const c of ["Replica", "State", "Queue", "Slots", "Last poll"]) head.appendChild(h("th", "", c));
+  t.appendChild(head);
+  for (const x of d.replicas) {
+    const known = x.state && (d.polling || x.state === "misconfigured");   // a wrong token doesn't fix itself
+    const [cls, icon, label] = known ? (REPLICA_STATES[x.state] || ["none", "–", x.state]) : ["none", "–", "Not polled"];
+    const r = h("tr"), cell = h("td");
+    cell.appendChild(state(cls, icon, label));
+    r.append(h("td", "", x.name), cell, h("td", "", known ? String(x.queue) : "–"), h("td", "", x.n_slots ? String(x.n_slots) : "–"),
+             h("td", "", x.polled_s_ago === null ? "never" : dur(x.polled_s_ago) + " ago"));
+    t.appendChild(r);
+  }
 }
 
 function renderTable(d) {

@@ -36,7 +36,7 @@ ARG GIT_COMMIT=unknown
 ENV TINYLLM_GIT_COMMIT=$GIT_COMMIT \
     MODEL=CoolDip00/tiny-llm-tinystories-30m REVISION=b11100b189f9d5085ce8c0fd775ca71a6eaf287c \
     SLOTS=8 PORT=7860 SLO_TTFT_S=2 LOG_DATASET="" \
-    MAX_QUEUE=4 RATE_LIMIT=20 RATE_BURST=5 PROXY_HOPS=1
+    MAX_QUEUE=4 RATE_LIMIT=20 RATE_BURST=5 PROXY_HOPS=1 TRUST_ROUTER=""
 
 EXPOSE 7860
 # Shell form so every ENV above can be overridden with -e (or a Space variable); exec keeps uvicorn as
@@ -48,11 +48,14 @@ EXPOSE 7860
 # --trust-proxy only on a Space (HF sets SPACE_ID): there HF's proxy adds the visitor's address to
 # X-Forwarded-For; a plain `docker run` has no proxy, so the header is the client's own and is ignored.
 # PROXY_HOPS: proxies in front that append to that header (the client is that many entries from the right).
+# TRUST_ROUTER (off when empty): only on a private replica behind the router (D-031). Never on a public
+# Space: a visitor could send the header themselves and get a new identity for each request.
 # LOG_DATASET (off when empty): a private HF dataset for the request logs (docs/SERVING.md "Privacy");
 # needs HF_TOKEN with write access to it, and TINYLLM_LOG_SALT to count visitors across restarts.
 CMD exec python -m tinyllm.server --hf-model "$MODEL" \
     $( [ -d "$MODEL" ] || echo --revision "$REVISION" ) \
     $( [ -z "$LOG_DATASET" ] || echo --log-dir /tmp/tinyllm-logs --log-dataset "$LOG_DATASET" ) \
     $( [ -z "$SPACE_ID" ] || echo --trust-proxy --proxy-hops "$PROXY_HOPS" ) \
+    $( [ -z "$TRUST_ROUTER" ] || echo --trust-router ) \
     --device cpu --host 0.0.0.0 --port "$PORT" --slots "$SLOTS" --slo-ttft-s "$SLO_TTFT_S" \
     --max-queue "$MAX_QUEUE" --rate-limit "$RATE_LIMIT" --rate-burst "$RATE_BURST"
