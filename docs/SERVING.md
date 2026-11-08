@@ -48,6 +48,17 @@ client ──HTTP──▶ FastAPI handlers ──▶ Router (1 variant now) ─
 
 ## Observability (4.13 step 2 + 6.5b)
 
+Where each metric is measured in one server:
+
+```mermaid
+flowchart LR
+    client([Client]) <-->|"POST, then<br/>JSON or SSE"| app["HTTP app (FastAPI)<br/>Clock starts at arrival<br/>429 if the queue is full<br/>Request log,<br/>/stats, /metrics"]
+    app --> queue["Queue<br/>Queue wait: arrival<br/>to first step"]
+    queue --> thread["Engine thread<br/>TTFT, token gaps, latency:<br/>stamped after each step<br/>Every ~5 s: queue length,<br/>busy slots, tok/s, KV used"]
+    thread <--> kv[("Slots and<br/>KV cache")]
+    thread -->|tokens| app
+```
+
 | # | Piece | What | Production analogue | Where |
 |---|---|---|---|---|
 | 1 | Request log | One JSON line per request: request id, variant / model version, arrival, queue wait, TTFT, inter-token latency p50 / p95, total latency, prompt / completion tokens, finish reason, status / error, hashed client id, queue depth and busy slots at arrival | Structured logging (ELK, Datadog) | 4.13 |
@@ -316,9 +327,12 @@ On a private test Space (`cpu-basic`, same image), called from WSL and from a te
 
 ### Router design
 
-```
-visitor ──▶ router Space (public) ──HTTPS + token──▶ replica Space 1 (private)
-                                                 └─▶ replica Space 2 (private)
+```mermaid
+flowchart LR
+    v([Visitor]) -->|HTTPS| r["Public router Space<br/>shortest queue, one retry,<br/>rate limit, demo and status pages,<br/>SLOs visitors see"]
+    r -->|HTTPS + token| a["Private replica Space 1<br/>30M model, 8 slots"]
+    r -->|HTTPS + token| b["Private replica Space 2<br/>30M model, 8 slots"]
+    r -.->|request logs,<br/>no prompts or IPs| d[("Private HF dataset")]
 ```
 
 **Setup**

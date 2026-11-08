@@ -4,7 +4,9 @@
 
 A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 GB), and an inference engine for it, benchmarked against the GPU's memory-bandwidth ceiling. Plain PyTorch, no inference libraries; Hugging Face Transformers appears only as a test reference and baseline.
 
-**Try it:** [live demo on Hugging Face Spaces](https://huggingface.co/spaces/CoolDip00/tiny-llm) ([status page](https://cooldip00-tiny-llm.hf.space/status)). It runs the 30M model on a free CPU Space and continues short stories. It is a base model trained only on TinyStories, so it doesn't answer questions. The speed numbers below come from the laptop GPU, not the Space. After two idle days the Space goes to sleep, so the next visitor waits while it wakes up.
+**Try it:** [live demo on Hugging Face Spaces](https://huggingface.co/spaces/CoolDip00/tiny-llm) ([status page](https://cooldip00-tiny-llm.hf.space/status)). It runs the 30M model on two private free-CPU Spaces behind our own public router Space, and continues short stories. It is a base model trained only on TinyStories, so it doesn't answer questions. The speed numbers below come from the laptop GPU, not the Spaces, except the one section that load-tests the Spaces. After two idle days the Spaces go to sleep, so the next visitor waits while they wake up.
+
+**Why:** inference libraries hide where the time goes. Building each layer by hand, from training through the inference engine to the HTTP server and its router, makes each one measurable, and the bandwidth ceiling shows how much speed is left to find.
 
 **Highlights**
 <!-- bench:highlights -->
@@ -16,6 +18,7 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 <!-- /bench:highlights -->
 - **Training:** a 30M-parameter model on ~1B TinyStories tokens in 2 h 27 min at **56% MFU**.
 - **HTTP server:** OpenAI-compatible, with streaming. Past capacity it rejects requests with a 429, so time to first token stays bounded, where vLLM's and llama.cpp's grow with the queue ([vs vLLM and llama.cpp](#results-vs-vllm-and-llamacpp)).
+- **Deployment:** the public demo is our own router in front of two replica Spaces on free CPUs. Two replicas hold 3 req/s within the latency targets where one holds 1, and peak served rises 1.85× to 2.00×, with no failed requests ([1 vs 2 replicas](#results-1-vs-2-replicas-on-hugging-faces-cpus)).
 
 > Status: **v1-preview**. Still to come: CUDA graphs for the paged engine and an attention ablation (see [Roadmap](#roadmap)).
 
@@ -78,6 +81,21 @@ TinyLlama 1.1B in bf16. All three engines serve the same OpenAI-compatible API t
 - **Past saturation:** we reject with 429s and keep latency bounded; vLLM and llama.cpp queue, and latency grows with the backlog.
 - **Caveats:** one session on 2026-11-07, run straight after the tables above with the same build, with the GPU thermally throttled in every run (83–86 °C), so differences under ~15% are ties. Our one-stream number here (120 tok/s) goes through the HTTP server with streaming; the 137 tok/s above is the engine alone.
 
+## Results: 1 vs 2 replicas on Hugging Face's CPUs
+
+The deployed setup, not the laptop GPU: the 30M model on free CPU Spaces (2 vCPU and 8 slots per replica) behind the router, load-tested from the laptop with 128 new tokens per request and 60 s per rate, with the router's per-visitor limit off. The SLOs: TTFT p95 within 2 s, 99% availability, at most 1% of requests refused.
+
+| Run | Replicas | Highest rate meeting every SLO | Peak served | Peak tok/s | Failed |
+|---|---|---|---|---|---|
+| A | 2 | 4 req/s | 4.61 req/s | 590 | 0 |
+| B | 1 | 1 req/s | 2.31 req/s | 295 | 0 |
+| C | 2 | 3 req/s | 4.27 req/s | 546 | 0 |
+
+- **Two replicas hold 3 req/s, and one holds 1.** 4 req/s is borderline for two: met in run A, missed in run C at a TTFT p95 of 2.30 s.
+- **Peak served is 1.85× to 2.00× one replica's.**
+- **Overload stays clean:** every refusal was the router's own 429, and no request failed.
+- **Caveats:** TTFT is measured on the laptop, so it includes the internet path, Hugging Face's proxy and the router hop. Each rate is one 60 s sample on shared hardware, and runs A and C show how much that moves. The rates tested were 1, 2, 3, 4 and 6 req/s, so the edges are coarse. Method and the full table: [docs/SERVING.md](docs/SERVING.md#results-1-vs-2-replicas-on-hfs-cpus-d-031-stage-3-2026-11-08).
+
 ## Results: training
 
 | | |
@@ -126,6 +144,27 @@ flowchart LR
 - **CUDA graphs:** the whole decode step is recorded once and replayed, so the CPU launches one graph instead of hundreds of kernels.
 - **HTTP server:** the engine runs in its own thread behind a FastAPI app that serves an OpenAI-compatible `/v1/completions`, streamed or not. When its queue is full it answers 429 instead of slowing everyone down; `/health`, `/ready` and Prometheus `/metrics` report its state ([docs/SERVING.md](docs/SERVING.md)).
 
+One server, and where each metric is measured. The clock starts when the HTTP app receives the request, so these times leave out the network; the load test's figures are measured at the client and include it:
+
+```mermaid
+flowchart LR
+    client([Client]) <-->|"POST, then<br/>JSON or SSE"| app["HTTP app (FastAPI)<br/>Clock starts at arrival<br/>429 if the queue is full<br/>Request log,<br/>/stats, /metrics"]
+    app --> queue["Queue<br/>Queue wait: arrival<br/>to first step"]
+    queue --> thread["Engine thread<br/>TTFT, token gaps, latency:<br/>stamped after each step<br/>Every ~5 s: queue length,<br/>busy slots, tok/s, KV used"]
+    thread <--> kv[("Slots and<br/>KV cache")]
+    thread -->|tokens| app
+```
+
+The public demo is a router Space in front of two private replica Spaces, each running the server above. The replicas demonstrate routing; the demo's traffic doesn't need them:
+
+```mermaid
+flowchart LR
+    v([Visitor]) -->|HTTPS| r["Public router Space<br/>shortest queue, one retry,<br/>rate limit, demo and status pages,<br/>SLOs visitors see"]
+    r -->|HTTPS + token| a["Private replica Space 1<br/>30M model, 8 slots"]
+    r -->|HTTPS + token| b["Private replica Space 2<br/>30M model, 8 slots"]
+    r -.->|request logs,<br/>no prompts or IPs| d[("Private HF dataset")]
+```
+
 ## Repository layout
 
 | Path | What's there |
@@ -138,11 +177,11 @@ flowchart LR
 | `src/tinyllm/quant.py` | INT8 weight-only quantization |
 | `src/tinyllm/kernels/` | Triton kernels: INT8 matmul for decode; RMSNorm fused with the residual add (the default on GPU; training and CPU use PyTorch) |
 | `src/tinyllm/hf_llama.py`, `safetensors_io.py`, `logit_compare.py` | Loads Llama-format checkpoints (TinyLlama) and exports to them; compares logits with a reference model |
-| `src/tinyllm/server.py`, `router.py`, `web_common.py`, `obs.py`, `logship.py` | OpenAI-compatible HTTP server (streaming, 429s past capacity, timeouts); router for replica Spaces (tested locally, not deployed yet); JSON logs and Prometheus metrics; log upload to a private HF dataset (no text, no IP) |
+| `src/tinyllm/server.py`, `router.py`, `web_common.py`, `obs.py`, `logship.py` | OpenAI-compatible HTTP server (streaming, 429s past capacity, timeouts); our router in front of the replica Spaces (runs the public demo); JSON logs and Prometheus metrics; log upload to a private HF dataset (no text, no IP) |
 | `Dockerfile`, `Dockerfile.router`, `space/`, `hf/` | CPU image of the server; image of the router; the Spaces' cards; the Hugging Face model card |
 | `src/tinyllm/provenance.py`, `results.py`, `plots.py` | Records where each benchmark number came from (commit, versions, GPU clocks); renders the results tables and plots |
-| `scripts/` | Data, tokenizer, benchmark, load-test (`load_test.py`), HF export (`export_hf.py`) and usage-report (`analyze_logs.py`) scripts |
-| `tests/` | 470 tests: every optimized path is checked against the slow reference path |
+| `scripts/` | Data, tokenizer, benchmark, load-test (`load_test.py`), HF export (`export_hf.py`), Space deployment (`push_space.py`) and usage-report (`analyze_logs.py`) scripts |
+| `tests/` | 640 tests: every optimized path is checked against the slow reference path |
 | `docs/` | Write-ups with the method and dated results of each step: [ARCHITECTURE](docs/ARCHITECTURE.md), [INFERENCE](docs/INFERENCE.md), [SERVING](docs/SERVING.md). Generated tables: [RESULTS](docs/RESULTS.md). Also [HARDWARE](docs/HARDWARE.md), [SETUP](docs/SETUP.md), [RESEARCH](docs/RESEARCH.md) (the attention ablation plan) and [PRIOR_ART](docs/PRIOR_ART.md) (related projects). `docs/img/` holds the plots, drawn by `scripts/bench_all.py` from the runs and `docs/data/` |
 
 ## Reproduce
@@ -177,6 +216,12 @@ curl localhost:7860/v1/completions -H 'content-type: application/json' -d '{"pro
 # In a browser: localhost:7860 is the demo, localhost:7860/status the status page (live charts, SLOs, error budget)
 # Request logs to a private HF dataset (-e LOG_DATASET=you/logs, needs HF_TOKEN), then a usage report from them
 uv run python scripts/analyze_logs.py --dataset you/logs --days 7
+
+# Route between two CPU servers (uses the checkpoint from training above); localhost:8000 is then the demo, /status the status page
+uv run python -m tinyllm.server --device cpu --ckpt checkpoints/main/best.pt --trust-router --port 8001 &
+uv run python -m tinyllm.server --device cpu --ckpt checkpoints/main/best.pt --trust-router --port 8002 &
+uv run python -m tinyllm.router --replica r1=http://127.0.0.1:8001 --replica r2=http://127.0.0.1:8002
+# Deploy to Spaces: scripts/push_space.py --role server|router|replica (dry run by default; see docs/SERVING.md)
 
 # Every results table: rerun all benchmarks (~1.5–2 h), then render docs/RESULTS.md and the README tables
 uv run python scripts/bench_all.py --run --power-mode performance
