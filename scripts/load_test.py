@@ -25,6 +25,9 @@ Rated load (goodput) = the highest rate at which the run, and every lower rate, 
 three SLOs: TTFT p95 <= target, availability >= 99%, 429s <= 1%. Server-side queue wait is in
 the server's request log and `/stats`.
 
+`--hf-login` sends the Hugging Face login of this machine, for a private Space; the token is not
+an argument and is never saved. Behind the router, each rate's summary has `by_replica`.
+
     uv run python scripts/load_test.py --url http://127.0.0.1:8000 --rates 1,2,4,8,16 \\
         --duration 60 --max-tokens 128 --slo local --power-mode Performance --label ours-8slots
     uv run python scripts/load_test.py --sequential 20 --max-tokens 256 --weight-bytes 2.2e9 \\
@@ -38,8 +41,10 @@ import asyncio
 import json
 import random
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -71,6 +76,7 @@ class Result:
     tokens: int = 0
     itl_s: list[float] = field(default_factory=list)
     error: str = ""
+    replica: str = ""                   # X-Replica: which replica the router used
 
 
 def poisson_arrivals(rate: float, duration: float, rng: random.Random) -> list[float]:
@@ -89,7 +95,7 @@ async def one_request(client: httpx.AsyncClient, body: dict, sent_s: float) -> R
     last, chunks, usage = None, 0, None
     try:
         async with client.stream("POST", "/v1/completions", json=body) as resp:
-            r.status = resp.status_code
+            r.status, r.replica = resp.status_code, resp.headers.get("x-replica", "")
             if resp.status_code != 200:
                 r.error = (await resp.aread()).decode(errors="replace")[:200]
                 return r
@@ -143,6 +149,7 @@ def summarize(results: list[Result], rate: float, wall_s: float, ttft_slo_s: flo
         "availability": round(1 - failed / n, 4) if n else None,
         "shed_rate": round(shed / n, 4) if n else None,
         "errors": sorted({r.error for r in results if r.error})[:5],
+        "by_replica": dict(sorted(Counter(r.replica for r in ok if r.replica).items())),
     }
     p95 = s["ttft_s"]["p95"]
     s["slo"] = {"ttft_p95": p95 is not None and p95 <= ttft_slo_s,
@@ -194,11 +201,23 @@ async def run_rate(client: httpx.AsyncClient, body_for, rate: float, duration: f
     return list(results), time.perf_counter() - t0
 
 
-async def run(args) -> dict:
+def hf_login_headers(url: str) -> dict[str, str]:
+    """This machine's Hugging Face login as a header. Only for an https://*.hf.space URL."""
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not (parts.hostname or "").endswith(".hf.space"):
+        raise ValueError("--hf-login only works with an https://*.hf.space URL")
+    from huggingface_hub import get_token                    # only when asked for
+    token = get_token()
+    if not token:
+        raise ValueError("--hf-login: no Hugging Face login on this machine")
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def run(args, headers: dict[str, str] | None = None) -> dict:
     prompts = (Path(args.prompts).read_text().splitlines() if args.prompts else PROMPTS)
     prompts = [p for p in prompts if p.strip()]
     limits = httpx.Limits(max_connections=None, max_keepalive_connections=None)
-    async with httpx.AsyncClient(base_url=args.url, timeout=args.timeout, limits=limits) as client:
+    async with httpx.AsyncClient(base_url=args.url, timeout=args.timeout, limits=limits, headers=headers) as client:
         model = args.model
         if model is None:
             model = (await client.get("/v1/models")).json()["data"][0]["id"]
@@ -237,7 +256,8 @@ async def run(args) -> dict:
                   f"fail {s['failed']:3d} | {s['achieved_rps']:6.2f} req/s {s['tok_s']:8.1f} tok/s | "
                   f"TTFT p50 {_ms(t['p50'])} p95 {_ms(t['p95'])} p99 {_ms(t['p99'])} | ITL p50 {_ms(it['p50'])} "
                   f"p99 {_ms(it['p99'])} | lat p99 {_ms(la['p99'])} | SLO {'ok' if s['meets_slo'] else 'MISS'} "
-                  f"{'' if s['meets_slo'] else [k for k, v in s['slo'].items() if not v]}", flush=True)
+                  f"{'' if s['meets_slo'] else [k for k, v in s['slo'].items() if not v]}"
+                  f"{' | ' + str(s['by_replica']) if s['by_replica'] else ''}", flush=True)
             if args.pause:
                 await asyncio.sleep(args.pause)
     summaries = [r["summary"] for r in rows]
@@ -251,6 +271,8 @@ def _ms(x: float | None) -> str:
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Poisson load test for /v1/completions (ours or vLLM)")
     ap.add_argument("--url", default="http://127.0.0.1:8000")
+    ap.add_argument("--hf-login", action="store_true",
+                    help="send this machine's Hugging Face login (private Space; *.hf.space URLs only)")
     ap.add_argument("--model", default=None, help="model name in requests; default: first of /v1/models")
     ap.add_argument("--rates", type=lambda s: [float(x) for x in s.split(",")], default=[1, 2, 4, 8],
                     help="requests/s, comma-separated")
@@ -275,15 +297,21 @@ def main(argv: list[str] | None = None) -> None:
     path = args.out or Path("runs/bench/load") / f"{args.label}.json"
     if path.exists():                                         # checked before the run, not after it
         ap.error(f"{path} exists: results are never overwritten; pick another --label or --out")
+    headers = None
+    if args.hf_login:
+        try:
+            headers = hf_login_headers(args.url)
+        except ValueError as e:
+            ap.error(str(e))
 
     from tinyllm.provenance import Provenance                # imports torch: keep it out of the client path
     prov = Provenance(power_mode=args.power_mode, url=args.url).start()
-    out = asyncio.run(run(args))
+    out = asyncio.run(run(args, headers))
     if not args.sequential:
         print(f"rated load (all SLOs met at it and below): {out['rated_load_rps']} req/s")
     record = {"workload": {k: getattr(args, k) for k in ("rates", "duration", "max_tokens", "temperature",
                                                          "warmup", "seed", "slo", "prompts", "sequential",
-                                                         "weight_bytes")},
+                                                         "weight_bytes", "hf_login")},
               "slo": {"ttft_p95_s": SLO_TTFT_P95_S[args.slo], "availability": SLO_AVAILABILITY,
                       "shed_max": SLO_SHED_MAX},
               "provenance": prov.finish(), **out}

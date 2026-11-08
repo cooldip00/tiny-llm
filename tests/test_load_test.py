@@ -5,11 +5,13 @@ import random
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from load_test import (BANDWIDTH, Result, main, poisson_arrivals, rated_load, summarize,  # noqa: E402
                        summarize_sequential)
+import load_test  # noqa: E402
 from test_server import model, serve  # noqa: E402, F401  (model is a fixture)
 
 from tinyllm.server import Faults  # noqa: E402
@@ -73,6 +75,60 @@ def test_existing_output_is_never_overwritten(tmp_path):
     with pytest.raises(SystemExit):                          # before any request: no server needed
         main(["--url", "http://127.0.0.1:9", "--power-mode", "test", "--out", str(out)])
     assert out.read_text() == "earlier result"
+
+
+FAKE_TOKEN = "fake-login-for-tests"
+
+
+def test_hf_login_is_sent_counted_by_replica_and_never_saved(tmp_path, monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("authorization"))
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        body = ('data: {"choices":[{"text":"a"}]}\n\n'
+                'data: {"choices":[],"usage":{"completion_tokens":1}}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, headers={"X-Replica": "r1" if len(seen) % 2 else "r2"}, text=body)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(load_test.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: FAKE_TOKEN)
+    out = tmp_path / "load.json"
+    main(["--url", "https://x-y.hf.space", "--hf-login", "--rates", "40", "--duration", "0.5", "--max-tokens", "1",
+          "--warmup", "1", "--pause", "0", "--power-mode", "test", "--out", str(out), "--keep-requests"])
+    assert len(seen) > 3 and set(seen) == {f"Bearer {FAKE_TOKEN}"}
+    text = out.read_text()
+    assert FAKE_TOKEN not in text
+    rec = json.loads(text)
+    assert rec["workload"]["hf_login"] is True
+    s = rec["rows"][0]["summary"]
+    assert set(s["by_replica"]) == {"r1", "r2"} and sum(s["by_replica"].values()) == s["ok"] == s["sent"]
+    assert {r["replica"] for r in rec["rows"][0]["requests"]} == {"r1", "r2"}
+
+
+@pytest.mark.parametrize("url", ["http://x.hf.space", "https://example.com", "https://x.hf.space.evil.com",
+                                 "https://x.hf.space@evil.com", "https://hf.space", "http://127.0.0.1:8000"])
+def test_hf_login_refused_for_any_other_url(url, tmp_path, monkeypatch):
+    def no_token():
+        raise AssertionError("the login must not even be read")
+
+    monkeypatch.setattr("huggingface_hub.get_token", no_token)
+    with pytest.raises(SystemExit) as e:
+        main(["--url", url, "--hf-login", "--power-mode", "test", "--out", str(tmp_path / "x.json")])
+    assert e.value.code == 2
+
+
+def test_hf_login_needs_a_login(tmp_path, monkeypatch):
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
+    with pytest.raises(SystemExit) as e:
+        main(["--url", "https://x.hf.space", "--hf-login", "--power-mode", "test", "--out", str(tmp_path / "x.json")])
+    assert e.value.code == 2
+
+
+def test_by_replica_is_empty_on_a_single_server():
+    assert summarize([ok(0.1)], 1.0, 1.0, 1.0)["by_replica"] == {}
 
 
 def test_sequential_summary_excludes_prefill():
