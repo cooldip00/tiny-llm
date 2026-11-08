@@ -153,7 +153,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
   - a serving architecture diagram (D-028 amendment, ~20 min, after 4.13): client → router → engine thread → slots / KV, and where each metric is measured; also in docs/SERVING.md
     - _D-031 (2026-11-07): drawn after the replicas. This diagram is one replica; a second, small one shows visitor → router Space → replica Spaces._
 - [x] 6.2 Plots: loss curves, inference speedups, ablation trade-offs. _Done 2026-11-06 (D-030): five SVGs in `docs/img/`, drawn by `bench_all.py` from the run behind the tables; three in the README, four in RESULTS.md. The ablation plots moved to 5.5._
-- [ ] 6.3 3–4 resume bullets with real numbers
+- [x] 6.3 3–4 resume bullets with real numbers. _Done 2026-11-08: four bullets (engine, serving, training, deployment), approved by the user; every number recomputed from its source file (evidence table in PROGRESS, 32 rows, 0 mismatches). Wording kept out of the repo._
 - [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
 - [ ] 6.5 Publish (added by D-021), in this order:
   - [x] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1). Plots added 2026-11-06 (6.2); pinned 2026-11-07._
