@@ -62,7 +62,7 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
      - the training val-loss curve
      - _Done 2026-11-06 in PLAN 6.2 (D-030), plus a serving plot and a decode-step profile in RESULTS.md._
   2. A short demo GIF of streaming generation (TinyLlama, KV + graphs).
-  3. A link to the HF Space once 6.5b is up.
+  3. A link to the HF Space once 6.5b is up. _Done 2026-11-08 (6.5b step 5 item 8)._
   4. A link to the blog post (6.5d).
   5. A GitHub social preview image (Settings → Social preview).
   6. A "What I learned / design decisions" section linking the key D-xxx entries.

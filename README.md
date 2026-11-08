@@ -4,6 +4,8 @@
 
 A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 GB), and an inference engine for it, benchmarked against the GPU's memory-bandwidth ceiling. Plain PyTorch, no inference libraries; Hugging Face Transformers appears only as a test reference and baseline.
 
+**Try it:** [live demo on Hugging Face Spaces](https://huggingface.co/spaces/CoolDip00/tiny-llm) ([status page](https://cooldip00-tiny-llm.hf.space/status)). It runs the 30M model on a free CPU Space and continues short stories. It is a base model trained only on TinyStories, so it doesn't answer questions. The speed numbers below come from the laptop GPU, not the Space. After two idle days the Space goes to sleep, so the next visitor waits while it wakes up.
+
 **Highlights**
 <!-- bench:highlights -->
 ![Bar chart, TinyLlama 1.1B decode at batch 1: HF Transformers generate 44 tok/s; Ours, naive 35 tok/s; Ours, KV cache 54 tok/s; Ours, KV cache + CUDA graphs 137 tok/s; bandwidth ceiling 192 tok/s](docs/img/decode_b1.svg)

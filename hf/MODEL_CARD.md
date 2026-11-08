@@ -97,4 +97,5 @@ The weights and code are MIT. The training data, TinyStories, is published under
 ## Links
 
 - Project, code and write-ups: <https://github.com/cooldip00/tiny-llm>
+- Live demo (story continuation on a free CPU Space): <https://huggingface.co/spaces/CoolDip00/tiny-llm>
 - TinyStories paper: Eldan & Li, 2023, [arXiv:2305.07759](https://arxiv.org/abs/2305.07759)
