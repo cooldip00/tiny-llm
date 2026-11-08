@@ -14,8 +14,7 @@ This is a plan, not a record of what is built. PLAN.md ticks each part when it l
 | Target | Model | Purpose |
 |---|---|---|
 | Local server in WSL (`localhost:8000`) | TinyLlama 1.1B Chat (bf16, CUDA graphs) | Load tests, the 4.8a comparison with vLLM / llama.cpp (same API, same client) |
-| Public HF Space (free CPU) | Our 30M model | Public demo, shows the full pipeline (our training, our engine) |
-| Planned (D-031): public router Space + 2 private replica Spaces (free CPU) | Our 30M model on the replicas; none on the router | Demonstrates routing across replicas (see "Scaling beyond one server"). Not built yet |
+| Public HF Space `CoolDip00/tiny-llm` (free CPU), running our router (D-031), + 2 private replica Spaces (free CPU) | Our 30M model on the replicas; none on the router | Public demo, shows the full pipeline (our training, our engine) and routing across replicas (see "Scaling beyond one server") |
 
 - The server takes `--model tinyllama` or `--ckpt <path>`, so it's one codebase for both.
 - The 30M model is a **base model trained only on TinyStories**, with no instruction tuning or RLHF. It continues stories and does not answer questions or follow instructions, so the API is `/v1/completions` (text in, continuation out), not chat. TinyLlama is chat-tuned: clients put its chat template into the prompt. The demo presents the 30M model as story continuation, with example openings.
@@ -259,7 +258,7 @@ Common to both:
 
 ## Scaling beyond one server (6.5b step 5 item 7; D-031 builds the router)
 
-The router code exists and is tested on the laptop (`src/tinyllm/router.py`, see "Built so far"), but it is **not deployed yet**: the public demo is still one Space. The measurements in this section are the capacity figures (laptop) and the "What we tested" table (HF).
+The router (`src/tinyllm/router.py`, see "Built so far") is deployed: since 2026-11-08 the public `CoolDip00/tiny-llm` Space runs it, in front of two private replica Spaces. The measurements in this section are the capacity figures (laptop and HF's CPUs) and the "What we tested" table (HF).
 
 ### One replica's capacity
 
@@ -323,7 +322,8 @@ visitor ──▶ router Space (public) ──HTTPS + token──▶ replica Spa
 ```
 
 **Setup**
-- Replicas are duplicated from `CoolDip00/tiny-llm`, same image and settings, private, `cpu-basic`.
+- Replicas are pushed from the repo with `scripts/push_space.py --role replica`: the server's image, private, `cpu-basic`, with `TRUST_ROUTER=1` and `RATE_LIMIT=0`.
+- Only the router ships request logs to the private dataset. Replicas have no secrets, so they ship none.
 - One fine-grained router token, read and write on the two replica Spaces only (write is needed to restart them), kept as a secret of the router Space.
 - The demo and status pages move to the router Space (they already use relative URLs).
 
@@ -378,9 +378,11 @@ Behaviour worth knowing:
 - With no replica ready the status page's load chart shows a gap, not zero.
 - A clean stop on SIGTERM exits with -15: uvicorn finishes shutting down, then re-raises the signal. The last log line is `stopped`.
 
-Router image (D-031 stage 2, tested on the laptop, not deployed): `Dockerfile.router`, about 59 MB, with no tokenizer and no torch (the build fails if torch can be imported). It installs `huggingface_hub` itself, pinned like the rest to `uv.lock`. `REPLICAS` lists the `name=url[,owner/space]` entries; on a Space it is a secret, so the private URLs are in no public file or setting. With the router running from this image against 2 real CPU servers, the smoke check, streaming, 12 concurrent requests (split 6 / 6), `kill -9` of one replica, its restart, and the 503 with both gone all behaved as above, and `docker stop` ended it cleanly.
+Router image (D-031 stage 2, tested on the laptop, then deployed): `Dockerfile.router`, about 59 MB, with no tokenizer and no torch (the build fails if torch can be imported). It installs `huggingface_hub` itself, pinned like the rest to `uv.lock`. `REPLICAS` lists the `name=url[,owner/space]` entries; on a Space it is a secret, so the private URLs are in no public file or setting. With the router running from this image against 2 real CPU servers, the smoke check, streaming, 12 concurrent requests (split 6 / 6), `kill -9` of one replica, its restart, and the 503 with both gone all behaved as above, and `docker stop` ended it cleanly.
 
-Not done yet: the replica Spaces, the router Space and its token, waking against real Spaces, and the 1-vs-2 load test.
+Deployed and tested on real Spaces (D-031 stage 2 and 3, 2026-11-08): two private replicas, the router and its token, waking two paused replicas (first request a 503 `waking_up` with `Retry-After: 30`, a request about 23 s later a 200), and the 1-vs-2 load test ("Results: 1 vs 2 replicas on HF's CPUs"). The public `CoolDip00/tiny-llm` then switched from the single server to the router; `push_space.py --role server` from the repo undoes that.
+
+Not done yet: how a sleeping private Space answers, as opposed to a paused one ("Still open").
 
 ### Autoscaling and capacity (not built)
 
@@ -391,8 +393,6 @@ Not done yet: the replica Spaces, the router Space and its token, waking against
 ### Still open
 
 - How a sleeping private Space answers a request with a token, and how long it takes to wake (2026-11-10).
-- Whether replicas ship request logs to the same dataset as today, labelled by replica (decided when D-031 is built).
-- Which public link the README and model card use once the router exists. Until then they link `CoolDip00/tiny-llm`. The plan is to switch to the router Space once D-031 works and keep `tiny-llm` running as the fallback.
 
 ## Release strategies (6.9, v1.1, after v1)
 
