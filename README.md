@@ -122,6 +122,9 @@ flowchart LR
     a1 --> n2[RMSNorm] --> mlp["SwiGLU MLP"] --> a2((+))
     a1 --> a2
     a2 --> out([out])
+    %% Invisible box: keeps the GitHub zoom buttons off the last node
+    a2 ~~~ gap["<br/><br/><br/><br/>"]
+    style gap fill:none,stroke:none
 ```
 
 A request's path through the serving engine:
@@ -136,6 +139,9 @@ flowchart LR
     kv <--> decode
     decode -->|finished, frees its KV| sched
     decode --> out([Tokens])
+    %% Invisible box: keeps the GitHub zoom buttons off the last node
+    decode ~~~ gap["<br/><br/><br/><br/>"]
+    style gap fill:none,stroke:none
 ```
 
 - **KV cache:** each step computes attention only for the new token and reads the cached keys and values of earlier ones.
@@ -153,6 +159,9 @@ flowchart LR
     queue --> thread["Engine thread<br/>TTFT, token gaps, latency:<br/>stamped after each step<br/>Every ~5 s: queue length,<br/>busy slots, tok/s, KV used"]
     thread <--> kv[("Slots and<br/>KV cache")]
     thread -->|tokens| app
+    %% Invisible box: keeps the GitHub zoom buttons off the last node
+    thread ~~~ gap["<br/><br/><br/><br/>"]
+    style gap fill:none,stroke:none
 ```
 
 The public demo is a router Space in front of two private replica Spaces, each running the server above. The replicas demonstrate routing; the demo's traffic doesn't need them:
@@ -163,6 +172,9 @@ flowchart LR
     r -->|HTTPS + token| a["Private replica Space 1<br/>30M model, 8 slots"]
     r -->|HTTPS + token| b["Private replica Space 2<br/>30M model, 8 slots"]
     r -.->|request logs,<br/>no prompts or IPs| d[("Private HF dataset")]
+    %% Invisible box: keeps the GitHub zoom buttons off the last node
+    r ~~~ gap["<br/><br/>"]
+    style gap fill:none,stroke:none
 ```
 
 ## Repository layout
