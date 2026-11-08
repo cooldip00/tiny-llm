@@ -224,9 +224,13 @@ class Metrics:
             buckets = [b for h, b in self._slo if h > hour_now - SLO_WINDOW_S / 3600]
         uptime = now - self.started
 
+        # Wall-clock minutes (12:03:00-12:03:59), not minutes counted back from this call, so a
+        # request keeps its bucket across refreshes; minutes_ago 0 is the minute in progress and
+        # the oldest one can be partial (the hour window is pruned by age).
         by_min: list[list[RequestRecord]] = [[] for _ in range(HISTORY_MINUTES)]
+        cur_min, into_min = wall // 60, wall % 60
         for t, r in recs:
-            ago = int((now - t) // 60)
+            ago = int(cur_min - (wall - (now - t)) // 60)
             if 0 <= ago < HISTORY_MINUTES:
                 by_min[ago].append(r)
         minutes = []
@@ -236,7 +240,8 @@ class Metrics:
             ttft = [r.ttft_s for r in ok if r.ttft_s is not None]
             lat = [r.latency_s for r in ok if r.latency_s is not None]
             minutes.append({
-                "minutes_ago": ago, "covered": uptime >= ago * 60,   # the server was up for this minute
+                # covered: the server started before this minute ended
+                "minutes_ago": ago, "covered": uptime > into_min + (ago - 1) * 60,
                 "requests": len(rs), "ok": len(ok),
                 "failed": sum(r.status >= 500 for r in rs), "shed": sum(r.status == 429 for r in rs),
                 "completion_tokens": sum(r.completion_tokens for r in rs),

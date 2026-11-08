@@ -122,6 +122,28 @@ def test_minutes_and_snapshots():
     assert h["uptime_s"] == 3600.5 and h["now_unix"] == 1.7e9
 
 
+def test_minutes_follow_the_clock_not_the_refresh():
+    clock = {"t": 0.0}
+    start = 1.7e9 - 1.7e9 % 60                                     # a whole wall-clock minute
+    m = Metrics(windows={"5m": 300.0}, clock=lambda: clock["t"], wall=lambda: start + clock["t"])
+
+    def counts(at):
+        clock["t"] = at
+        return {x["minutes_ago"]: x["requests"] for x in m.history()["minutes"] if x["requests"]}
+
+    m.observe(rec(), now=10.0)                                     # both in clock minute 0
+    m.observe(rec(), now=50.0)
+    assert counts(70.0) == {1: 2}                                  # 60 s and 20 s old: still together
+    assert counts(105.0) == {1: 2}
+    m.observe(rec(), now=110.0)                                    # 20 s apart, but minutes 1 and 2
+    m.observe(rec(), now=130.0)
+    assert counts(140.0) == {2: 2, 1: 1, 0: 1}
+    assert counts(175.0) == {2: 2, 1: 1, 0: 1}                     # same groups a moment later
+    assert counts(185.0) == {3: 2, 2: 1, 1: 1}                     # a new minute shifts all by one
+    covered = {x["minutes_ago"]: x["covered"] for x in m.history()["minutes"]}
+    assert covered[3] and not covered[4]                           # up since the start of minute 0
+
+
 # -- live server -------------------------------------------------------------------------
 
 def test_pages_and_history_endpoint(model):
