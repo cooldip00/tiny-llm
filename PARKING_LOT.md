@@ -3,6 +3,16 @@
 Good ideas that are **out of scope for the current phase**. Add them here instead of acting on them.
 Review at Phase 6.4.
 
+## Reviewed 2026-11-08 (PLAN 6.4)
+- **Before v1:** no code from this file.
+- **v1.1 is already PLAN 6.9** (release strategies, ~9–10 h). Follow-ups picked to come after it, in this order:
+  1. CUDA graphs for the paged engine (contiguous slots with graphs are 2.9× paged on the 30M model; named in the README roadmap), then the `--kv paged` load test.
+  2. Prefix caching, option A, ~3–4 h (vLLM and llama.cpp both have it).
+  3. CUDA graphs for prefill, ~2–3 h (ITL p99 30–45 ms against p50 9 ms).
+  4. `bench_all` throttle warning fix, ~30 min.
+- **With 6.5d (blog) or the first post:** README blog link, animated paged-KV explainer, GitHub social preview image.
+- **Stay parked:** everything else, including all research and Phase 5 / 7 items (D-021).
+
 Format: `- [date] idea — why it's interesting — which phase it might fit`
 
 ## Seeded
@@ -21,9 +31,9 @@ Format: `- [date] idea — why it's interesting — which phase it might fit`
 ## Added during work
 - ~~[2026-11-03] `torch.compile` on the training step — likely +20–40% tok/s by fusing RMSNorm/RoPE/SwiGLU element-wise ops (MFU is 31–36% today) — before the 3.7 main run if time matters, needs a DECISIONS entry~~ → done before 3.7: **+57%**, on by default (D-020).
 - ~~[2026-11-04] `tests/test_model.py::test_initial_loss_near_uniform` is unseeded, so it depends on global RNG order: it fails when run alone (9.11 vs 9.01 ± 0.1) and passes in the full suite. Seed it, or loosen the tolerance with a reason. Found in 4.2.~~ → fixed 2026-11-04. It is seeded now, and the target was wrong: the initial loss is ln V + σ²/2 = 9.088 (σ = init_std·√d), not ln V. Measured over 20 seeds: 9.088 ± 0.026.
-- [2026-11-04] Batch-1 decode is overhead-bound (~10 ms/step, ~1.5% of the bandwidth ceiling, from 4.1). CUDA graphs or `torch.compile(mode="reduce-overhead")` on the decode step, plus keeping bf16 weights instead of autocast re-casting each step, could be the bigger B=1 win than the KV cache. Measure after 4.3; needs a DECISIONS entry.
+- ~~[2026-11-04] Batch-1 decode is overhead-bound (~10 ms/step, ~1.5% of the bandwidth ceiling, from 4.1). CUDA graphs or `torch.compile(mode="reduce-overhead")` on the decode step, plus keeping bf16 weights instead of autocast re-casting each step, could be the bigger B=1 win than the KV cache. Measure after 4.3; needs a DECISIONS entry.~~ → done in PLAN 4.11 (CUDA graphs on the decode step; current numbers in the README). The `torch.compile` comparison stays parked (entry below).
   - _Measured in 4.6 (`scripts/bench_quant.py`):_ bf16-stored weights alone are 1.28× / 1.20× / 1.31× fp32 + autocast at B=1 / 8 / 32, with val loss Δ +0.0001. CUDA graphs / compile are still unmeasured.
-- [2026-11-04] Continuous batching admits with a blocking prefill: running slots stall while newcomers prefill (a continuous step is ~13.2 ms vs ~12.2 ms for a static one, in 4.4). Chunked prefill (split a prompt into chunks interleaved with decode steps, as in vLLM / Sarathi) would smooth this out. An arrival-process workload (Poisson arrivals) would also make the 4.4 latency numbers more realistic than "all queued at t=0".
+- [2026-11-04] Continuous batching admits with a blocking prefill: running slots stall while newcomers prefill (a continuous step is ~13.2 ms vs ~12.2 ms for a static one, in 4.4). Chunked prefill (split a prompt into chunks interleaved with decode steps, as in vLLM / Sarathi) would smooth this out. An arrival-process workload (Poisson arrivals) would also make the 4.4 latency numbers more realistic than "all queued at t=0". _2026-11-08 (6.4): Poisson arrivals are done (`scripts/load_test.py`, 4.13). Chunked prefill stays parked; it only helps long prompts (see the prefill-graphs entry)._
 - [2026-11-04] From 4.5 (paged KV):
   - (a) A paged-attention kernel (Triton) that reads K/V blocks in place through the block table, instead of gathering them into a contiguous copy every step. This would also fit Phase 7.
   - (b) Decode only the active rows. Today every slot runs, even empty ones, so 64 slots with ≤25 active wastes ~60% of the rows.
@@ -61,24 +71,24 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
      - throughput vs batch size
      - the training val-loss curve
      - _Done 2026-11-06 in PLAN 6.2 (D-030), plus a serving plot and a decode-step profile in RESULTS.md._
-  2. A short demo GIF of streaming generation (TinyLlama, KV + graphs).
+  2. A short demo GIF of streaming generation (TinyLlama, KV + graphs). _2026-11-08 (6.1): not for now, by the user's choice; can be added later._
   3. A link to the HF Space once 6.5b is up. _Done 2026-11-08 (6.5b step 5 item 8)._
-  4. A link to the blog post (6.5d).
-  5. A GitHub social preview image (Settings → Social preview).
+  4. A link to the blog post (6.5d). _With 6.5d._
+  5. A GitHub social preview image (Settings → Social preview). _2026-11-08 (6.4): with 6.5d, just before the first post, so it carries v1 numbers. Per repo, set in the repo's Settings, no commit; 1280×640, under 1 MB._
   6. A "What I learned / design decisions" section linking the key D-xxx entries.
   7. Plain-language explainers for non-specialists: what a KV cache is and why decode is memory-bound.
-- [2026-11-06] **Animated paged-KV explainer** (from 6.2). An animation (SVG/JS or a short video) of requests arriving, taking KV blocks from the pool through their block tables, finishing and freeing them, next to contiguous slots wasting their reserved tail. It needs JavaScript or video, so it can't live in the README (D-030); it belongs in the blog post or on the Space — 6.5d / v1.1.
-- [2026-11-06] **Docker Space** — run the HF Space as a Docker Space with the same image as the local server, so "it works on my machine" and "it works on the Space" are one claim. Also gives a one-line `docker run` in the README — 6.5b.
+- [2026-11-06] **Animated paged-KV explainer** (from 6.2). An animation (SVG/JS or a short video) of requests arriving, taking KV blocks from the pool through their block tables, finishing and freeing them, next to contiguous slots wasting their reserved tail. It needs JavaScript or video, so it can't live in the README (D-030); it belongs in the blog post or on the Space — 6.5d / v1.1. _2026-11-08 (6.4): with 6.5d._
+- ~~[2026-11-06] **Docker Space** — run the HF Space as a Docker Space with the same image as the local server, so "it works on my machine" and "it works on the Space" are one claim. Also gives a one-line `docker run` in the README — 6.5b.~~ → done in 6.5b (D-033).
   - _Promoted to PLAN 6.5b (D-028 amendment, 2026-11-06)._
-- [2026-11-06] **CI smoke deploy** — a CI job that builds the image, starts the server on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion. It catches packaging breaks before the Space does — 6.5b / 6.7.
+- ~~[2026-11-06] **CI smoke deploy** — a CI job that builds the image, starts the server on the CPU with a tiny random model, and checks `/health`, `/ready` and one completion. It catches packaging breaks before the Space does — 6.5b / 6.7.~~ → done in 6.5b: CI builds the image and runs `scripts/smoke_server.py` against it.
   - _Promoted to PLAN 6.5b (D-028 amendment, 2026-11-06)._
-- [2026-11-06] **Failure-injection tests** — a fault-injection hook in the engine thread (slow step, exception at step N, OOM), to test that timeouts, 500s, readiness and draining behave as designed. This is a common interview question ("what happens when...") — 4.13 step 2 if cheap, else v1.1.
+- ~~[2026-11-06] **Failure-injection tests** — a fault-injection hook in the engine thread (slow step, exception at step N, OOM), to test that timeouts, 500s, readiness and draining behave as designed. This is a common interview question ("what happens when...") — 4.13 step 2 if cheap, else v1.1.~~ → done in 4.13 step 2.
   - _Promoted to PLAN 4.13 step 2 (D-028 amendment, 2026-11-06)._
-- [2026-11-06] **Serving architecture diagram** — one diagram in the README and SERVING.md: client → router → engine thread → slots / KV, plus where each metric is measured. Useful to point at in interviews — 6.1.
+- ~~[2026-11-06] **Serving architecture diagram** — one diagram in the README and SERVING.md: client → router → engine thread → slots / KV, plus where each metric is measured. Useful to point at in interviews — 6.1.~~ → done in 6.1 (README and docs/SERVING.md).
   - _Promoted to PLAN 6.1 (D-028 amendment, 2026-11-06)._
-- [2026-11-06] **Offline eval gate per variant** — before any shadow / canary, a variant must pass a fixed eval: val loss (or perplexity) within a threshold, greedy agreement vs the current model on a fixed prompt set, and the benchmark. Gives 6.9's promotion pipeline its first stage as code, not prose — 6.9.
+- ~~[2026-11-06] **Offline eval gate per variant** — before any shadow / canary, a variant must pass a fixed eval: val loss (or perplexity) within a threshold, greedy agreement vs the current model on a fixed prompt set, and the benchmark. Gives 6.9's promotion pipeline its first stage as code, not prose — 6.9.~~ → moved to PLAN 6.9 (v1.1, still open).
   - _Promoted to PLAN 6.9 (D-028 amendment, 2026-11-06)._
-- [2026-11-06] **Written SLOs + error budget** — define 2–3 SLOs (TTFT p95, availability, 429 rate) in SERVING.md with their error budgets, and have the status page show the budget left — 6.5b.
+- ~~[2026-11-06] **Written SLOs + error budget** — define 2–3 SLOs (TTFT p95, availability, 429 rate) in SERVING.md with their error budgets, and have the status page show the budget left — 6.5b.~~ → done: written in docs/SERVING.md (4.13 step 3), shown on the status page (6.5b).
   - _Promoted: defined in PLAN 4.13 step 3, shown in 6.5b (D-028 amendment, 2026-11-06)._
 - [2026-11-06] **Queue sized from the SLO** (from the 4.13 step 3 load test). With `--max-queue 32`, admitted requests waited up to ~5.9 s past capacity, against a 1 s TTFT target. A queue of ≈ TTFT target × throughput (≈ 5 on TinyLlama at 8 slots) sheds more 429s but keeps admitted requests within the SLO. Possibly derive it automatically from the measured throughput. Rerun `load_test.py` at 6 / 8 req/s to compare — 6.5b (Space defaults) or 4.8a. _Applied to the Space defaults 2026-11-07 (6.5b step 5: queue 4 kept TTFT p95 ≤ 1.5 s at 2× rated load; docs/SERVING.md). The automatic version and TinyLlama remain open._
   - _Measured 2026-11-06 with `--max-queue 5`: TTFT p95 5.8 → 0.92 / 1.13 s at 6 / 8 req/s, same throughput, 429s 33 → 37 / 92 → 156 (PROGRESS). Manual sizing works; deriving it automatically (~1.5 h) stays parked — v1.1._
@@ -89,6 +99,7 @@ These map to PLAN Phase 7. Don't start any of them before v1 ships.
 - [2026-11-07] **INT8 serving comparison** (from 4.10b; the README vs vLLM / llama.cpp table is bf16 on all three). Ours with int8-triton vs llama.cpp Q8_0 vs vLLM with an 8-bit checkpoint, each in its own 8-bit format; never ours int8 against their bf16. Needs our server tested with int8 weights + slot graphs. Cheap first step (~30 min): one-stream only, ours int8 vs llama.cpp Q8_0. The full load sweep is ~2–3 h — after v1.
 - [2026-11-07] **CUDA Docker image** (from D-033; v1 ships a CPU-only image). A second image on a CUDA base with Triton, so `docker run --gpus all` gets the GQA + Triton + CUDA-graph paths on TinyLlama. 6–8 GB, needs the NVIDIA container toolkit to test and can't be smoke-tested in free CI. ~1–2 h — v1.1.
 - [2026-11-07] **Train the 30M model with GQA vs MHA** (from D-033). Same data, steps and seed; compare val loss, KV cache size and decode tok/s at long context. At 30M the KV cache is tiny, so expect little speed difference; the question is the quality cost of fewer KV heads at this scale. GQA itself is already shown on TinyLlama (4.9a) — Phase 5, after v1 (D-021).
-- [2026-11-06] **Serve the exported HF folder with our server** (from 4.8b). `--model` only knows TinyLlama, and `HFTokenizer` assumes Llama's `<s>` / `</s>`. Reading BOS / EOS from `tokenizer_config.json` instead would let the server load `runs/export/tinystories-30m` (or the Hub repo) the same way as TinyLlama, so the Space could pull weights from the Hub instead of baking them into the image. ~1 h — decide in 6.5b.
+- ~~[2026-11-06] **Serve the exported HF folder with our server** (from 4.8b). `--model` only knows TinyLlama, and `HFTokenizer` assumes Llama's `<s>` / `</s>`. Reading BOS / EOS from `tokenizer_config.json` instead would let the server load `runs/export/tinystories-30m` (or the Hub repo) the same way as TinyLlama, so the Space could pull weights from the Hub instead of baking them into the image. ~1 h — decide in 6.5b.~~ → done in 6.5b for our story model: the server loads the export and the Space pulls a pinned revision from the Hub (`Dockerfile`). Reading BOS / EOS for other models was not done; the server rejects them with a clear error.
 - [2026-11-07] **`bench_all` throttle warning misfires on mixed-load benchmarks** (from 4.10c). It warns when the busy SM clock median is < 1,400 MHz, but `30m-serving` runs light configs where the GPU clocks down at 52–57 °C (median 1,155 MHz in v1b, 1,267 in v1) with no throttling. Judge by temperature + throttle reasons, or take the clock median only over samples above some utilization. ~30 min plus a test — v1.1.
-- [2026-11-07] **Restore the status page's 7-day SLO window after a restart** (6.5b step 3). The hourly SLO counters live in memory, so on the free Space the window is really "since the last restart". At start, rebuild them from the last 7 days of the logs dataset (step 4). ~1 h. After 6.5b, or with D-031 if the router keeps the counters.
+- [2026-11-07] **Restore the status page's 7-day SLO window after a restart** (6.5b step 3). The hourly SLO counters live in memory, so on the free Space the window is really "since the last restart". At start, rebuild them from the last 7 days of the logs dataset (step 4). ~1 h. After 6.5b, or with D-031 if the router keeps the counters. _2026-11-08 (6.4): still open; docs/SERVING.md states the limit._
+- [2026-11-08] **Load-test the HTTP server with `--kv paged`** (from 6.3). Every HTTP load test used contiguous slots, so the paged cache's 1.64× comes only from the offline 64-request workload. Compare `--kv paged` with slots at the same memory, both without graphs, or after the paged engine has graphs — v1.1, with the paged-graphs item.

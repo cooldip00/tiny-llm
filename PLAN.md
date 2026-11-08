@@ -154,7 +154,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
     - _D-031 (2026-11-07): drawn after the replicas. This diagram is one replica; a second, small one shows visitor → router Space → replica Spaces._
 - [x] 6.2 Plots: loss curves, inference speedups, ablation trade-offs. _Done 2026-11-06 (D-030): five SVGs in `docs/img/`, drawn by `bench_all.py` from the run behind the tables; three in the README, four in RESULTS.md. The ablation plots moved to 5.5._
 - [x] 6.3 3–4 resume bullets with real numbers. _Done 2026-11-08: four bullets (engine, serving, training, deployment), approved by the user; every number recomputed from its source file (evidence table in PROGRESS, 32 rows, 0 mismatches). Wording kept out of the repo._
-- [ ] 6.4 Review PARKING_LOT.md and pick follow-ups
+- [x] 6.4 Review PARKING_LOT.md and pick follow-ups. _Done 2026-11-08: finished or promoted items closed; no code before v1; follow-ups after 6.9 listed at the top of PARKING_LOT.md (paged-engine graphs first)._
 - [ ] 6.5 Publish (added by D-021), in this order:
   - [x] 6.5a Public GitHub repo, pinned on the profile; README leads with the results table and plots. _Public 2026-11-05 (v1-preview): README leads with the results tables; plots still to add (v1). Plots added 2026-11-06 (6.2); pinned 2026-11-07._
   - [x] 6.5b Hugging Face: our model with a model card, plus a small Gradio Space demo _Done 2026-11-08: a Docker Space, not Gradio (D-033): https://huggingface.co/spaces/CoolDip00/tiny-llm. Still open, tracked under D-031 below: the router and replicas, and the sleep check on 2026-11-10._
