@@ -1,0 +1,43 @@
+# The tinyllm replica router (D-031): the image behind the public Space. No model and no torch here:
+# the two private replica Spaces run the Dockerfile next to this one.
+#
+#   docker build -f Dockerfile.router -t tinyllm-router --build-arg GIT_COMMIT=$(git rev-parse --short HEAD) .
+#   docker run --rm -p 7860:7860 -e REPLICAS="r1=http://host:9101 r2=http://host:9102" tinyllm-router
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Versions match uv.lock. huggingface-hub is for waking replicas and uploading logs.
+RUN pip install huggingface-hub==2.4.0 httpx==0.28.1 fastapi==0.162.0 starlette==1.10.0 pydantic==2.14.2 uvicorn==0.54.0
+
+# Spaces run the container as uid 1000.
+RUN useradd -m -u 1000 user
+USER user
+ENV HOME=/home/user HF_HOME=/home/user/.cache/huggingface PYTHONPATH=/app/src
+WORKDIR /app
+
+COPY --chown=user src/tinyllm ./src/tinyllm
+
+# The router must keep working without torch: fail the build if that stops being true.
+RUN python -c "import importlib.util as u, tinyllm.router, tinyllm.logship; assert u.find_spec('torch') is None"
+
+ARG GIT_COMMIT=unknown
+ENV TINYLLM_GIT_COMMIT=$GIT_COMMIT \
+    PORT=7860 SLO_TTFT_S=2 LOG_DATASET="" MODEL_LABEL=tiny-llm-tinystories-30m \
+    RATE_LIMIT=20 RATE_BURST=5 PROXY_HOPS=1
+
+EXPOSE 7860
+# REPLICAS: space-separated name=url[,owner/space]. On a Space it is a secret, so the private replica
+# URLs are in no public file or setting. Empty = the router refuses to start.
+# TINYLLM_REPLICA_TOKEN: a secret, read by the router itself; it is never a flag. The Space ids in
+# REPLICAS are required with it, because waking restarts a Space by its id.
+# --trust-proxy only on a Space (HF sets SPACE_ID): see the comment in the Dockerfile next to this one.
+# LOG_DATASET (off when empty): needs HF_TOKEN with write access to it, and TINYLLM_LOG_SALT.
+CMD exec python -m tinyllm.router \
+    $(for r in $REPLICAS; do echo --replica "$r"; done) \
+    $( [ -z "$LOG_DATASET" ] || echo --log-dir /tmp/tinyllm-logs --log-dataset "$LOG_DATASET" --log-replica router ) \
+    $( [ -z "$SPACE_ID" ] || echo --trust-proxy --proxy-hops "$PROXY_HOPS" ) \
+    --host 0.0.0.0 --port "$PORT" --slo-ttft-s "$SLO_TTFT_S" --model-label "$MODEL_LABEL" \
+    --rate-limit "$RATE_LIMIT" --rate-burst "$RATE_BURST"

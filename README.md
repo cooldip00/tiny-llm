@@ -139,7 +139,7 @@ flowchart LR
 | `src/tinyllm/kernels/` | Triton kernels: INT8 matmul for decode; RMSNorm fused with the residual add (the default on GPU; training and CPU use PyTorch) |
 | `src/tinyllm/hf_llama.py`, `safetensors_io.py`, `logit_compare.py` | Loads Llama-format checkpoints (TinyLlama) and exports to them; compares logits with a reference model |
 | `src/tinyllm/server.py`, `router.py`, `web_common.py`, `obs.py`, `logship.py` | OpenAI-compatible HTTP server (streaming, 429s past capacity, timeouts); router for replica Spaces (tested locally, not deployed yet); JSON logs and Prometheus metrics; log upload to a private HF dataset (no text, no IP) |
-| `Dockerfile`, `hf/` | CPU image of the server; the Hugging Face model card |
+| `Dockerfile`, `Dockerfile.router`, `space/`, `hf/` | CPU image of the server; image of the router; the Spaces' cards; the Hugging Face model card |
 | `src/tinyllm/provenance.py`, `results.py`, `plots.py` | Records where each benchmark number came from (commit, versions, GPU clocks); renders the results tables and plots |
 | `scripts/` | Data, tokenizer, benchmark, load-test (`load_test.py`), HF export (`export_hf.py`) and usage-report (`analyze_logs.py`) scripts |
 | `tests/` | 470 tests: every optimized path is checked against the slow reference path |
