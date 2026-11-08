@@ -111,7 +111,36 @@ Pass 2, 8 slots: how long a queue.
 - With queue 32 the measured throughput (2.16 req/s at 8 slots) is understated: the run's wall time includes draining the long queue. With queue 4 the same server served 3.0 req/s.
 - 4 → 8 slots: decode stays smooth (ITL p50 15–18 ms, p99 ≤ 40 ms with queue 4).
 - **Rate limit: 20 requests/min per visitor, burst 5.** One visitor can't hold more than ~1/6 of the rated load; a person clicking "generate" never hits it.
-- **Caveat:** the laptop's cores are likely faster than HF's shared vCPUs, so these numbers are an upper estimate for the Space. The live Space got smoke checks only (6.5b step 5 item 6): a load test from one address would hit its 20/min limit and fill the public logs with test traffic. Capacity on HF's hardware is measured in D-031's 1-vs-2 load test.
+- **Caveat:** the laptop's cores are likely faster than HF's shared vCPUs, so these numbers are an upper estimate for the Space. The live Space got smoke checks only (6.5b step 5 item 6): a load test from one address would hit its 20/min limit and fill the public logs with test traffic. Capacity on HF's hardware is in the next section.
+
+### Results: 1 vs 2 replicas on HF's CPUs (D-031 stage 3, 2026-11-08)
+
+Real free CPU Spaces: a temporary private router Space in front of 1 or 2 private replica Spaces (2 vCPU each, `SLOTS=8`, `MAX_QUEUE=4`), driven from the laptop with `load_test.py --slo space --max-tokens 128 --hf-login`, 60 s per rate, the router's per-visitor limit off (`RATE_LIMIT=0`). One session: two replicas (A), one replica (B), two again (C). Files: `runs/bench/load/space-router/20261108-{a-2rep,b-1rep,c-2rep}.{json,log,stats.json}`.
+
+| Run | Replicas | Offered req/s | Sent | Served | 429 | Failed | Served req/s | tok/s | TTFT p95 | r1 / r2 | SLOs |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A | 2 | 1 | 50 | 50 | 0 | 0 | 0.80 | 102 | 1.46 s | 26 / 24 | met |
+| A | 2 | 2 | 115 | 115 | 0 | 0 | 1.79 | 230 | 1.52 s | 57 / 58 | met |
+| A | 2 | 3 | 181 | 181 | 0 | 0 | 2.84 | 363 | 1.53 s | 91 / 90 | met |
+| A | 2 | 4 | 241 | 241 | 0 | 0 | 3.73 | 477 | 1.86 s | 121 / 120 | met |
+| A | 2 | 6 | 393 | 297 | 96 | 0 | 4.61 | 590 | 3.12 s | 151 / 146 | missed |
+| B | 1 | 1 | 50 | 50 | 0 | 0 | 0.80 | 102 | 1.26 s | 50 / - | met |
+| B | 1 | 2 | 115 | 114 | 1 | 0 | 1.74 | 223 | 2.34 s | 114 / - | missed |
+| B | 1 | 3 | 181 | 141 | 40 | 0 | 2.21 | 283 | 2.90 s | 141 / - | missed |
+| B | 1 | 4 | 241 | 152 | 89 | 0 | 2.31 | 295 | 2.93 s | 152 / - | missed |
+| B | 1 | 6 | 393 | 140 | 253 | 0 | 2.14 | 273 | 3.38 s | 140 / - | missed |
+| C | 2 | 1 | 50 | 50 | 0 | 0 | 0.80 | 102 | 1.29 s | 25 / 25 | met |
+| C | 2 | 2 | 115 | 115 | 0 | 0 | 1.78 | 228 | 1.28 s | 61 / 54 | met |
+| C | 2 | 3 | 181 | 181 | 0 | 0 | 2.81 | 360 | 1.32 s | 92 / 89 | met |
+| C | 2 | 4 | 241 | 240 | 1 | 0 | 3.65 | 467 | 2.30 s | 121 / 119 | missed |
+| C | 2 | 6 | 393 | 279 | 114 | 0 | 4.27 | 546 | 3.12 s | 147 / 132 | missed |
+
+- **Two replicas: rated 3 req/s.** Run A met every SLO up to 4 req/s and run C up to 3. At 4 req/s, TTFT p95 was 1.86 s in A and 2.30 s in C against the 2 s target, so 4 req/s is borderline and 3 is the figure that held in both.
+- **One replica: rated 1 req/s.** It missed at 2 req/s narrowly (TTFT p95 2.34 s, 1 shed). The rates are coarse, so its edge lies somewhere between 1 and 2.
+- **Peak served is the cleaner comparison**, because it doesn't depend on the 2 s line: two replicas 4.27 to 4.61 req/s (546 to 590 tok/s), one replica 2.31 req/s (295 tok/s), a gain of 1.85x to 2.00x.
+- **Overload stayed clean.** No request failed in any run; every 429 (96 in A, 383 in B, 115 in C) was the router's own `server_busy`, and HF's proxy refused nothing. Least-outstanding routing split the load almost evenly at every rate.
+- **The laptop estimate was an upper bound, as the caveat above expected:** `--cpus 2` on the laptop gave one server a rated 2.0 req/s and 3.0 req/s served at overload.
+- **Limits of these numbers.** TTFT is measured on the laptop, so it includes the internet path, HF's proxy and the router hop: p50 was 1.18 to 1.24 s even at 1 req/s. Each cell is one 60 s sample on shared hardware; A and C are the same setup and show how much that moves.
 
 ### Results: TinyLlama on three engines, rerun (4.10c, 2026-11-07)
 
@@ -191,7 +220,7 @@ Both pages are static HTML + JS in `src/tinyllm/web/`, served by the server itse
 - SLO maths (`Metrics.history`, tested in `tests/test_status.py`):
   - TTFT: bad = a served request (200) whose TTFT is above `--slo-ttft-s` (1 s by default; the Docker image sets 2 s); total = served requests
   - availability: bad = status ≥ 500; total = 200 + 429 + ≥ 500
-  - shed: bad = 429, same total. Shown but **not judged**: the rated load of the Space is unknown until the D-031 load test, and above it 429s are intended.
+  - shed: bad = 429, same total. Shown but **not judged**: the rated load depends on the number of replicas (1 req/s for one, 3 for two; "Results: 1 vs 2 replicas on HF's CPUs"), and above it 429s are intended.
   - budget left = 1 − bad / ((1 − target) × total). It goes negative once the budget is spent (the page shows "used up").
   - burn rate = (bad / total over the last hour) / (1 − target). Flagged above 14.4× when the hour has ≥ 10 counted requests.
 - **Limit: the 7-day window starts at the last restart.** Counters are kept in memory per hour, and a free Space restarts often (sleep, rebuilds), so in practice the window is "since the last restart". The page says so. Restoring the full window from the logs dataset (step 4) is parked.
@@ -235,6 +264,7 @@ The router code exists and is tested on the laptop (`src/tinyllm/router.py`, see
 ### One replica's capacity
 
 - **Rated load: 2.0 req/s (~235 tok/s)** at `SLOTS=8`, `MAX_QUEUE=4`, 128 tokens per request. Measured on the laptop under `--cpus 2`, so treat it as an upper estimate for HF's shared vCPUs (see the caveat in "Results: Space defaults on 2 CPUs").
+- **Measured on HF's CPUs: rated 1 req/s**, peak served 2.31 req/s (295 tok/s), TTFT measured from the laptop ("Results: 1 vs 2 replicas on HF's CPUs"). The visit figures below use the laptop's 2 req/s; at 1 req/s they halve.
 - **What runs out first: CPU.** Above the rated load the slots and the short queue fill, TTFT p95 rises towards the 2 s target, and the server sheds the rest with fast 429s. Memory is not the limit: the 30M model ran within `--memory 6g`, and the Space has 16 GB.
 - **Visitors it can serve.** Assume a visit is about 5 generations. 2 req/s is 7,200 requests an hour, so about 1,400 visits an hour at peak. Spread evenly, that would be about 34,000 visits a day, but real traffic is bursty, so the hourly figure is the useful one.
 - A personal demo sees far fewer visits than that. **One replica has enough capacity for the demo's traffic; what visitors actually notice is the cold start after sleep.** The replicas in D-031 demonstrate routing. They are not there because the traffic needs them.
@@ -355,13 +385,12 @@ Not done yet: the replica Spaces, the router Space and its token, waking against
 ### Autoscaling and capacity (not built)
 
 - **Autoscaling** would use queue depth or the SLO burn rate, not CPU %: add a replica when mean `outstanding` stays above `n_slots` for 2 minutes or availability is in fast burn; remove one after 30 minutes under half load. It isn't built: HF doesn't autoscale free Spaces, and our own limits above rule out creating Spaces automatically.
-- **Capacity:** replicas = ⌈peak req/s ÷ (rated req/s per replica × 0.7 headroom)⌉. With the laptop's 2.0 req/s, 2 replicas cover 2.8 req/s at peak. D-031's load test replaces 2.0 with a number from HF's hardware.
+- **Capacity:** replicas = ⌈peak req/s ÷ (rated req/s per replica × 0.7 headroom)⌉. With the 1 req/s measured for one replica on HF, 2 replicas cover 1.4 req/s at peak. That is cautious: the test's rates are coarse, and two replicas measured 3 req/s.
 - **Prefix-aware routing** (send requests sharing a prompt prefix to the replica that has its KV cached) only helps once prefix caching exists, which is parked (see "Prefix caching").
 
 ### Still open
 
 - How a sleeping private Space answers a request with a token, and how long it takes to wake (2026-11-10).
-- Capacity per replica on HF's vCPUs (D-031's load test).
 - Whether replicas ship request logs to the same dataset as today, labelled by replica (decided when D-031 is built).
 - Which public link the README and model card use once the router exists. Until then they link `CoolDip00/tiny-llm`. The plan is to switch to the router Space once D-031 works and keep `tiny-llm` running as the fallback.
 
