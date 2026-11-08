@@ -149,7 +149,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
 ---
 
 ## Phase 6 — Writeup
-- [ ] 6.1 README: what, why, results, how to reproduce
+- [x] 6.1 README: what, why, results, how to reproduce. _Done 2026-11-08: a 'Why' paragraph, Deployment highlight, 1 vs 2 replicas results, router commands in Reproduce; two serving diagrams (one server and its metrics; router and replicas), also in docs/SERVING.md. Checked rendered on GitHub._
   - a serving architecture diagram (D-028 amendment, ~20 min, after 4.13): client → router → engine thread → slots / KV, and where each metric is measured; also in docs/SERVING.md
     - _D-031 (2026-11-07): drawn after the replicas. This diagram is one replica; a second, small one shows visitor → router Space → replica Spaces._
 - [x] 6.2 Plots: loss curves, inference speedups, ablation trade-offs. _Done 2026-11-06 (D-030): five SVGs in `docs/img/`, drawn by `bench_all.py` from the run behind the tables; three in the README, four in RESULTS.md. The ablation plots moved to 5.5._
