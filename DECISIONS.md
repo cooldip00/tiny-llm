@@ -386,6 +386,18 @@ Status: `ACCEPTED` · `OPEN` · `SUPERSEDED`
   - Routing in the browser (the page reads each Space's `/stats`): no server-side canary or rollback, no central logs, and CORS.
   - A Cloudflare Worker as router: a second language and codebase.
   - Leaving it to v1.1: there is time before ~11-18.
+- **Amendment (2026-11-08), after the feasibility test and the terms check (6.5b step 5):** the Choice above stands; these points add to it or narrow it. Full design: `docs/SERVING.md`, "Scaling beyond one server".
+  - **Feasibility test: GO** (private test Space, `cpu-basic`). Without a token a private Space answers 404; with a fine-grained token, completions work and SSE streams one chunk per token. Paused, it answers 503 `text/html` in ~1.1 s. A paused Space woken through `restart_space` served its first 200 at 35.1 s, after a read timeout and a 502. Wake from sleep is still to be measured (2026-11-10). A real router Space calling a replica is first tested in the build.
+  - **Terms caveat closed (read 2026-11-08):** ToS, Content Policy, Supplemental Terms with Hub Premium Features, Spaces docs. No page forbids several Spaces or a router Space, and none sets a Space count for PRO. They don't address forwarding between Spaces or keep-alive. The Content Policy lists "proxies… to bypass restrictions" and "excessive bulk activity" as abuse, and HF's own replicas are paid-only, so three limits apply:
+    - no keep-alive: replicas sleep normally, are woken only for real visitor traffic, and polling stops 10 minutes after the last visitor
+    - two replicas, fixed; no automatic creation of Spaces
+    - presented as a learning demo of routing, not as a way to avoid paying for replicas
+  - **Replicas are private**, duplicated from `CoolDip00/tiny-llm`, never from the test Space (its Dockerfile is test-only).
+  - **One router token:** fine-grained, read and write on the two replica Spaces only (write is needed for restart), stored as a secret of the router Space.
+  - **Retry narrowed:** at most one, on a different replica, only before the first byte reaches the visitor, and only after a `server_busy` 429 or a connection error. A `rate_limit_error` 429 goes to the visitor.
+  - **Wake narrowed:** in the background, at most one wake per replica per 5 minutes, and a request never waits on a waking replica. If none is ready, the visitor gets a 503 with `Retry-After`.
+  - **Rate limit and visitor hash move to the router.** It forwards the hash and `X-Request-ID`; replicas turn off their per-visitor limit and keep the queue limit.
+  - **SLOs visitors see are measured at the router**, including retries and the extra hop. A "waking up" 503 counts against availability.
 
 ### D-032 — RMSNorm defaults to the Triton kernel; every GPU table rerun in one session before v1 · ACCEPTED (2026-11-07)
 - **Context:** 4.10a fused RMSNorm and residual add + RMSNorm into Triton kernels (`src/tinyllm/kernels/rmsnorm.py`). On TinyLlama with CUDA graphs, decode is 1.07× / 1.06× / 1.04× at batch 1 / 8 / 32 (128 → 137 tok/s at batch 1). The batch-1 step drops from 1,164 to 827 GPU ops; GPU busy time drops from 7.74 to 7.25 ms at the same 1,875 MHz clock. With the PyTorch norm, each norm runs about 7 small kernels. The 4.10a code shipped with `"torch"` as the default, so no existing number changed.
