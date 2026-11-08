@@ -121,8 +121,10 @@ flowchart LR
     x --> a1
     a1 --> n2[RMSNorm] --> mlp["SwiGLU MLP"] --> a2((+))
     a1 --> a2
+    %% Invisible boxes: keep the GitHub buttons off the last node
+    a2 ~~~ gap0["<br/>"]
+    style gap0 fill:none,stroke:none
     a2 --> out([out])
-    %% Invisible box: keeps the GitHub zoom buttons off the last node
     a2 ~~~ gap["<br/><br/><br/><br/>"]
     style gap fill:none,stroke:none
 ```
