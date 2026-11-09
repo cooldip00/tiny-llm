@@ -17,7 +17,7 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 - **Serving:** continuous batching gives 1.37× static batching. A paged KV cache fits 25 sequences where contiguous slots fit 8, for 1.64× the throughput in the same memory.
 <!-- /bench:highlights -->
 - **Training:** a 30M-parameter model on ~1B TinyStories tokens in 2 h 27 min at **56% MFU**.
-- **HTTP server:** OpenAI-compatible, with streaming. Past capacity it rejects requests with a 429, so time to first token stays bounded, where vLLM's and llama.cpp's grow with the queue ([vs vLLM and llama.cpp](#results-vs-vllm-and-llamacpp)).
+- **HTTP server:** OpenAI-compatible `/v1/completions`, with streaming. Past capacity it rejects requests with a 429, so time to first token stays bounded, where vLLM's and llama.cpp's grow with the queue ([vs vLLM and llama.cpp](#results-vs-vllm-and-llamacpp)).
 - **Deployment:** the public demo is our own router in front of two replica Spaces on free CPUs. Two replicas hold 3 req/s within the latency targets where one holds 1, and peak served rises 1.85× to 2.00×, with no failed requests ([1 vs 2 replicas](#results-1-vs-2-replicas-on-hugging-faces-cpus)).
 
 > Status: **v1-preview**. Still to come: CUDA graphs for the paged engine and an attention ablation (see [Roadmap](#roadmap)).
