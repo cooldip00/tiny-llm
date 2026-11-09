@@ -253,9 +253,9 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
       - Before creating them: read Hugging Face's terms on several Spaces serving one app.
       - If late, cut first the 1-vs-2 load test, then move the router and replicas to v1.1.
       - _Stage 1 done 2026-11-08: router code, CPU tests against fake replicas, real end-to-end run on the laptop CPU (docs/SERVING.md "Built so far"). Open: stage 2 (create the Spaces and the router token), stage 3 (1-vs-2 load test)._
-  - [ ] 6.5c W&B project set to public; link the training curves from the README
+  - [x] 6.5c W&B project set to public; link the training curves from the README
   - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume
-  - [ ] 6.5e LinkedIn: three posts, one per milestone (training done → KV cache + paged KV → TinyLlama results)
+  - [ ] 6.5e LinkedIn: three posts, whole story first (whole project + blog link → why decode is memory-bandwidth bound and CUDA graphs → serving, the vLLM comparison, router and replicas). _Order changed 2026-11-09: everything is built, so the posts no longer follow build order._
   - [ ] 6.5f r/LocalLLaMA (and r/MachineLearning with a [P] tag) once the TinyLlama numbers are in
   - [ ] 6.5g Direct outreach: send the repo to engineers at companies building inference products
 - [ ] 6.6 Self-check before sharing (added by D-021): explain every file out loud without notes, e.g. why the KV cache helps, why decode is memory-bandwidth bound, how the paged allocator handles fragmentation, why tied embeddings, the 6N + 12LdT FLOPs formula, why compile helped. Anything that can't be defended stays off the resume.

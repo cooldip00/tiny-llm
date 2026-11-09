@@ -109,6 +109,8 @@ The deployed setup, not the laptop GPU: the 30M model on free CPU Spaces (2 vCPU
 
 ![Line chart: training and validation loss of the 30M model over 996M tokens, falling from 9.0 to a final validation loss of 1.2825, with train and validation loss close together throughout](docs/img/train_loss.svg)
 
+The full run is public on Weights & Biases: [main-3.7](https://forge.coreweave.com/wandb/cooldip00-personal/tinyllm/runs/ugd124lz) has the loss, learning-rate, MFU and GPU charts, the config, and sample stories every 200 steps.
+
 Sample after training, prompted with "Once upon a time": *"…a little girl named Lily. She was very curious… she found a shiny rock that looked like it was magic… she saw a butterfly that was also very shiny…"*
 
 ## How it works

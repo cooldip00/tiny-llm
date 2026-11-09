@@ -73,7 +73,7 @@ diff -r /mnt/d/ResumeProject/tiny-llm ~/llm && echo IDENTICAL
 cd ~/llm
 git init -b main
 git config user.name  "Kuladip Joshi"          # repo-local, not global
-git config user.email "kuladip00@gmail.com"
+git config user.email "you@example.com"
 ```
 Plus a `.gitignore` that keeps data, checkpoints, model weights (`*.bin`, `*.safetensors`, `*.pt`, `*.gguf`), `wandb/`, `.venv/` and secrets (`.env`, `.netrc`) out of git.
 
