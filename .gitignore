@@ -23,6 +23,7 @@ runs/
 
 # Personal notes (local only, never pushed)
 *.local.md
+study/
 
 # Editors / OS
 .vscode/
