@@ -284,7 +284,7 @@ The router (`src/tinyllm/router.py`, see "Built so far") is deployed: since 2026
 | Limit | What it means here |
 |---|---|
 | Sleeps after 48 h without use (HF docs) | The next visitor waits for a cold start |
-| Cold start | Paused → first 200 took **35.1 s** (D-031 test, below). Sleep → first 200 is measured on 2026-11-10 |
+| Cold start | Paused → first 200 took **35.1 s** (D-031 test, below). Asleep → a request held while the Space woke got its 200 at **25.1 s** (test Space, 2026-11-10). Through the router: to be measured after the wake fix |
 | No autoscaling | HF's replicas feature is "only available for upgraded (paid) hardware" |
 | 2 vCPU, 16 GB, likely shared | Speed isn't stated by HF and hasn't been measured under load there, so the laptop's numbers may not hold |
 | The in-memory SLO window restarts with the Space | See "Demo and status pages" |
@@ -323,7 +323,9 @@ On a private test Space (`cpu-basic`, same image), called from WSL and from a te
 | Paused, no token | 404 HTML |
 | Paused, with token (`/health` and POST alike) | 503 `text/html` in ~1.1 s, "The space is paused, ask a maintainer to restart it" |
 | Wake a paused Space with `restart_space` (write token) | Read timeout at 21.6 s (`APP_STARTING`) → 502 at 28.3 s (`RUNNING`) → **200 at 35.1 s** |
-| Wake from sleep | Pending: 2026-11-10 |
+| Asleep, with the owner's login (`/health`), 2026-11-10 | **No page.** The request is held while the Space wakes, then answered: 200 JSON at 25.1 s, and the Space is `RUNNING` after |
+| Two asleep replicas behind the router (old code), 2026-11-10 | The 2 s poll timed out, so both were marked down and never woken. A visitor got 503 `waking_up` in 1.7 s, and both were still `SLEEPING` 3 minutes later. Fixed: see "Waking" |
+| Wake an asleep replica through the router (fixed code) | Pending: 2026-11-10 |
 
 ### Router design
 
@@ -351,8 +353,9 @@ flowchart LR
 |---|---|---|
 | `/ready` 200 | Ready | Can receive requests |
 | 503 JSON from our server | Starting, draining or engine failed | Not eligible; keep polling |
-| 503 `text/html`, "space is paused" | Paused (for sleep: to be confirmed 2026-11-10) | Not eligible; wake if traffic needs it |
-| 502, connection error or timeout | Starting or down | Not eligible; keep polling |
+| 503 `text/html`, "space is paused" | Paused. An asleep Space sends no page (next row) | Not eligible; wake if traffic needs it |
+| No answer at all: connection error or timeout | Asleep (it holds requests while it wakes), starting, or down | Not eligible; keep polling; wake if traffic needs it, and the Hub's stage decides whether a restart happens |
+| 502 | Starting or down | Not eligible; keep polling |
 | 404 `text/html`, or any 401 / 403 | Token or URL is wrong: a config bug | Not eligible; never wake; log an error; show it on the status page |
 | Any other HTML or non-JSON page (even a 200), or a 3xx | Not from our server. Redirects are never followed, so the token can't be sent elsewhere | Not eligible; keep polling |
 | 429 JSON, `server_busy` | Queue full | One retry on another ready replica |
@@ -367,7 +370,8 @@ flowchart LR
 **Waking**
 - A request never waits on a waking replica: 35 s is longer than a visitor will wait. If no replica is ready, the visitor gets a 503 with `Retry-After`, and the demo page says it is waking up.
 - A wake runs in the background and only for real visitor traffic: when no replica is ready, or when the ready ones are shedding load and another is asleep. At most one wake per replica per 5 minutes.
-- Every paused replica is woken, not just one. Only a paused replica is restarted: restarting a running Space would kill its requests.
+- Every paused or silent replica is woken, not just one. Silent means its last poll got no answer at all: an asleep Space holds requests while it wakes and sends no page, so the 2 s poll gives up first (2026-11-10).
+- Before a restart, the router reads the Space's stage from the Hub and restarts it only if it is `SLEEPING` or `PAUSED`: restarting a running Space would kill its requests, and a starting one needs no help. The stage it saw is logged with the replica name, never the Space id.
 
 **Visitors and limits**
 - The rate limit (20/min, burst 5) and the visitor hash move to the router. HF's proxy adds the visitor's address to `X-Forwarded-For`; the router reads it with `--trust-proxy` and hashes it with `TINYLLM_LOG_SALT`.
@@ -396,7 +400,7 @@ Router image (D-031 stage 2, tested on the laptop, then deployed): `Dockerfile.r
 
 Deployed and tested on real Spaces (D-031 stage 2 and 3, 2026-11-08): two private replicas, the router and its token, waking two paused replicas (first request a 503 `waking_up` with `Retry-After: 30`, a request about 23 s later a 200), and the 1-vs-2 load test ("Results: 1 vs 2 replicas on HF's CPUs"). The public `CoolDip00/tiny-llm` then switched from the single server to the router; `push_space.py --role server` from the repo undoes that.
 
-Not done yet: how a sleeping private Space answers, as opposed to a paused one ("Still open").
+Sleep (2026-11-10): an asleep private Space sends no page, so the deployed router never woke one ("What we tested"). Fixed in code: silent replicas are woken too, after a check of the Hub's stage. The wake through the router is tested next, on the real asleep replicas.
 
 ### Autoscaling and capacity (not built)
 
@@ -406,7 +410,8 @@ Not done yet: how a sleeping private Space answers, as opposed to a paused one (
 
 ### Still open
 
-- How a sleeping private Space answers a request with a token, and how long it takes to wake (2026-11-10).
+- How long an asleep replica takes to serve again when the router wakes it (2026-11-10, after the fix is deployed).
+- Why the router's polls didn't wake the replicas while the owner's request did: the 2 s poll gives up early, or a request with a fine-grained token doesn't count as use. Not tested; the fix doesn't depend on it.
 
 ## Release strategies (6.9, v1.1, after v1)
 

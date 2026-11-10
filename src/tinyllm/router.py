@@ -33,6 +33,7 @@ from tinyllm.web_common import (CLIENT_HEADER, HeadersMiddleware, RateLimiter, c
                                 resolve_salt)
 
 log = logging.getLogger("tinyllm.router")
+ASLEEP_STAGES = ("SLEEPING", "PAUSED")   # Hub runtime stages that a restart wakes; any other stage is left alone
 
 
 class Verdict(Enum):
@@ -104,6 +105,7 @@ class Replica:
     space_id: str = ""              # owner/name on the Hub, for waking it
     woken_at: float | None = None
     model: dict | None = None       # id, version and norm_backend, from the last readable /stats
+    silent: bool = False            # the last poll got no answer at all: a sleeping Space holds requests while it wakes
 
     @property
     def ready(self) -> bool:
@@ -286,7 +288,7 @@ def _model(stats: bytes) -> dict | None:
 
 class ReplicaRouter:
     def __init__(self, replicas: list[Replica], cfg: RouterConfig, token: str | None = None,
-                 metrics: Metrics | None = None, wake: Callable[[Replica], None] | None = None):
+                 metrics: Metrics | None = None, wake: Callable[[Replica], str | None] | None = None):
         self.cfg = cfg
         self.replicas = replicas
         self.picker = Picker(replicas)
@@ -351,6 +353,7 @@ class ReplicaRouter:
             if isinstance(result, Exception):
                 log.error("poll failed", extra={"fields": {"replica": replica.name, "error": type(result).__name__}})
                 replica.polled(Verdict.DOWN, time.monotonic())
+                replica.silent = False
         self._snapshot()
 
     async def _get(self, replica: Replica, path: str) -> httpx.Response | None:
@@ -367,6 +370,7 @@ class ReplicaRouter:
         except asyncio.TimeoutError:
             ready = stats = None
         before, verdict, now = replica.verdict, classify(_reply(ready)), time.monotonic()
+        replica.silent = ready is None
         if verdict is Verdict.OK:
             readable = classify(_reply(stats)) is Verdict.OK
             load = _load(stats.content) if readable else None
@@ -421,11 +425,15 @@ class ReplicaRouter:
         return out
 
     def wake_asleep(self, now: float) -> None:
-        """Only a replica HF says is paused: restarting a running one would kill its requests."""
+        """A replica HF says is paused, or one whose last poll got no answer at all: a sleeping Space holds
+        requests while it wakes, and a short poll gives up first (2026-11-10 check). The wake function reads
+        the Hub's own stage and restarts only a sleeping or paused Space: restarting a running one would kill
+        its requests."""
         if self.wake is None:
             return
         for r in self.replicas:
-            if r.verdict is Verdict.ASLEEP and (r.woken_at is None or now - r.woken_at >= self.cfg.wake_cooldown_s):
+            asleep = r.verdict is Verdict.ASLEEP or (r.verdict is Verdict.DOWN and r.silent)
+            if asleep and (r.woken_at is None or now - r.woken_at >= self.cfg.wake_cooldown_s):
                 r.woken_at = now
                 task = asyncio.create_task(self._wake(r))
                 self._background.add(task)
@@ -434,7 +442,10 @@ class ReplicaRouter:
     async def _wake(self, replica: Replica) -> None:
         log.info("waking replica", extra={"fields": {"replica": replica.name}})
         try:
-            await asyncio.to_thread(self.wake, replica)
+            stage = await asyncio.to_thread(self.wake, replica)
+            if stage is not None:
+                log.info("wake checked", extra={"fields": {"replica": replica.name, "hub_stage": stage,
+                                                           "restarted": stage in ASLEEP_STAGES}})
         except Exception as e:      # its text may name the private Space
             log.error("wake failed", extra={"fields": {"replica": replica.name, "error": type(e).__name__}})
 
@@ -579,16 +590,22 @@ class ReplicaRouter:
             await resp.aclose()
 
 
-def hf_wake(token: str | None) -> Callable[[Replica], None]:
-    """A wake function that restarts the replica's Space on the Hub. It blocks: run it in a thread."""
-    def wake(replica: Replica) -> None:
+def hf_wake(token: str | None) -> Callable[[Replica], str | None]:
+    """A wake function that restarts the replica's Space on the Hub, but only if the Hub says it is asleep.
+    Returns the stage it saw. It blocks: run it in a thread."""
+    def wake(replica: Replica) -> str:
         from huggingface_hub import HfApi
-        HfApi(token=token).restart_space(replica.space_id)
+        api = HfApi(token=token)
+        raw = api.get_space_runtime(replica.space_id).stage    # a plain str today, typed as the SpaceStage enum
+        stage = str(getattr(raw, "value", raw))
+        if stage in ASLEEP_STAGES:
+            api.restart_space(replica.space_id)
+        return stage
     return wake
 
 
 def create_router_app(replicas: list[Replica], cfg: RouterConfig | None = None, token: str | None = None,
-                      metrics: Metrics | None = None, wake: Callable[[Replica], None] | None = None,
+                      metrics: Metrics | None = None, wake: Callable[[Replica], str | None] | None = None,
                       shipper=None) -> FastAPI:
     """Only the routes listed here exist, so no other path of a replica can be reached through the router."""
     cfg = cfg or RouterConfig()

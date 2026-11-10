@@ -7,10 +7,12 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from contextlib import contextmanager
 
 import httpx
 import pytest
+from huggingface_hub import SpaceStage
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
@@ -765,19 +767,61 @@ def test_a_failed_wake_is_contained():
         assert "private-url" not in first.text + second.text
 
 
-def test_hf_wake_restarts_the_named_space(monkeypatch):
-    seen = []
+@pytest.mark.parametrize("fake, cfg", [
+    (None, {}),                                         # nothing at the address at all
+    (lambda: Fake(ready=slow), {"poll_timeout_s": 0.1}),  # a sleeping Space: holds the poll while it wakes
+], ids=["no-connection", "held-past-the-poll-timeout"])
+def test_a_silent_replica_is_woken_once_per_cooldown(fake, cfg):
+    waker = Waker()
+    with world(fake and fake(), ready=False, poll=True, wake=waker, **cfg) as w:
+        r = w.post()
+        assert (r.status_code, r.json()["error"]["type"]) == (503, "waking_up")
+        assert (w.replicas[0].verdict, w.replicas[0].silent) == (Verdict.DOWN, True)
+        until(lambda: waker.woken)
+        assert w.post().status_code == 503
+        time.sleep(0.05)
+        assert waker.woken == ["r1"]
 
-    class Api:
-        def __init__(self, token=None):
-            seen.append(token)
 
-        def restart_space(self, repo_id, **kw):
-            seen.append((repo_id, kw))
+def test_a_silent_replica_that_answers_again_is_no_longer_silent():
+    fake = Fake(ready=slow)
+    with world(fake, ready=False, poll=True, poll_timeout_s=0.1, poll_interval_s=0.02) as w:
+        assert w.post().status_code == 503 and w.replicas[0].silent
+        fake.ready = BAD_GATEWAY
+        until(lambda: not w.replicas[0].silent)
+        assert w.replicas[0].verdict is Verdict.DOWN
 
-    monkeypatch.setattr("huggingface_hub.HfApi", Api)
-    hf_wake("t")(Replica("r1", "http://x", space_id="me/r1"))
-    assert seen == ["t", ("me/r1", {})]                 # no factory reboot: the image is kept
+
+class Hub:
+    """Stands in for HfApi: one Space at the given stage."""
+
+    def __init__(self, stage):
+        self.stage, self.seen = stage, []
+
+    def __call__(self, token=None):
+        self.seen.append(token)
+        return self
+
+    def get_space_runtime(self, repo_id, **kw):
+        self.seen.append(("runtime", repo_id))
+        return types.SimpleNamespace(stage=self.stage)
+
+    def restart_space(self, repo_id, **kw):
+        self.seen.append(("restart", repo_id, kw))
+
+
+@pytest.mark.parametrize("stage, restarts", [
+    ("SLEEPING", True), ("PAUSED", True), (SpaceStage.PAUSED, True),     # the enum has no SLEEPING: compare text
+    ("RUNNING", False), ("APP_STARTING", False), ("RUNNING_APP_STARTING", False), ("BUILDING", False),
+    ("RUNTIME_ERROR", False), ("STOPPED", False), (SpaceStage.RUNNING, False),
+])
+def test_hf_wake_restarts_only_a_space_the_hub_says_is_asleep(monkeypatch, stage, restarts):
+    hub = Hub(stage)
+    monkeypatch.setattr("huggingface_hub.HfApi", hub)
+    seen_stage = hf_wake("t")(Replica("r1", "http://x", space_id="me/r1"))
+    restart = [("restart", "me/r1", {})] if restarts else []     # no factory reboot: the image is kept
+    assert hub.seen == ["t", ("runtime", "me/r1"), *restart]
+    assert seen_stage == getattr(stage, "value", stage)
 
 
 # -- pages, metrics and the command line ----------------------------------------------------
