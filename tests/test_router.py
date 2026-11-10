@@ -629,11 +629,11 @@ def test_a_refused_request_is_not_traffic():
 @pytest.mark.parametrize("ready, verdict, wakes", [
     (lambda: NOT_READY, Verdict.NOT_READY, False),
     (lambda: ASLEEP, Verdict.ASLEEP, True),
-    (lambda: BAD_GATEWAY, Verdict.DOWN, False),
+    (lambda: BAD_GATEWAY, Verdict.DOWN, True),             # down: the Hub's stage decides (see hf_wake)
     (lambda: NOT_FOUND, Verdict.MISCONFIGURED, False),
     (lambda: answer(401, '{"error": "bad token"}'), Verdict.MISCONFIGURED, False),
-    (lambda: answer(302, "{}", headers={"location": "http://elsewhere"}), Verdict.DOWN, False),
-    (lambda: answer(200, "<html>a landing page</html>", HTML), Verdict.DOWN, False),
+    (lambda: answer(302, "{}", headers={"location": "http://elsewhere"}), Verdict.DOWN, True),
+    (lambda: answer(200, "<html>a landing page</html>", HTML), Verdict.DOWN, True),
 ], ids=["starting", "paused", "bad-gateway", "wrong-url", "bad-token", "redirect", "landing-page"])
 def test_what_a_poll_found_decides_eligibility_and_waking(ready, verdict, wakes):
     waker, fake = Waker(), Fake(ready=ready())
@@ -769,27 +769,19 @@ def test_a_failed_wake_is_contained():
 
 @pytest.mark.parametrize("fake, cfg", [
     (None, {}),                                         # nothing at the address at all
-    (lambda: Fake(ready=slow), {"poll_timeout_s": 0.1}),  # a sleeping Space: holds the poll while it wakes
-], ids=["no-connection", "held-past-the-poll-timeout"])
-def test_a_silent_replica_is_woken_once_per_cooldown(fake, cfg):
+    (lambda: Fake(ready=slow), {"poll_timeout_s": 0.1}),  # held past the poll timeout
+    (lambda: Fake(ready=BAD_GATEWAY), {}),              # a fast answer that isn't ours (what asleep replicas sent)
+], ids=["no-connection", "held-past-the-poll-timeout", "fast-answer-not-ours"])
+def test_a_down_replica_is_woken_once_per_cooldown(fake, cfg):
     waker = Waker()
     with world(fake and fake(), ready=False, poll=True, wake=waker, **cfg) as w:
         r = w.post()
         assert (r.status_code, r.json()["error"]["type"]) == (503, "waking_up")
-        assert (w.replicas[0].verdict, w.replicas[0].silent) == (Verdict.DOWN, True)
+        assert w.replicas[0].verdict is Verdict.DOWN
         until(lambda: waker.woken)
         assert w.post().status_code == 503
         time.sleep(0.05)
         assert waker.woken == ["r1"]
-
-
-def test_a_silent_replica_that_answers_again_is_no_longer_silent():
-    fake = Fake(ready=slow)
-    with world(fake, ready=False, poll=True, poll_timeout_s=0.1, poll_interval_s=0.02) as w:
-        assert w.post().status_code == 503 and w.replicas[0].silent
-        fake.ready = BAD_GATEWAY
-        until(lambda: not w.replicas[0].silent)
-        assert w.replicas[0].verdict is Verdict.DOWN
 
 
 class Hub:
@@ -940,6 +932,9 @@ def test_the_shipped_log_has_no_prompt_address_or_token(tmp_path):
     text = "".join(f.read_text(encoding="utf-8") for f in tmp_path.rglob("*.jsonl"))
     assert '"request"' in text and "server ready" in text and "stopped" in text
     assert "ZQXJ" not in text and TOKEN not in text and "127.0.0.1" not in text
+    state = [json.loads(line) for line in text.splitlines() if "replica state" in line and "misconfigured" in line]
+    assert len(state) == 1 and "404" in json.dumps(state[0]) and "text/html" in json.dumps(state[0])
+    assert "<html>" not in text                 # the reply's status and type are logged, never its body
 
 
 def test_the_log_shipper_is_closed_on_shutdown():

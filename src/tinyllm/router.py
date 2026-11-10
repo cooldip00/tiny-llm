@@ -47,6 +47,11 @@ class Verdict(Enum):
     PASS = "pass"                   # any other answer from our server: the visitor should see it
 
 
+# Worth asking the Hub about when traffic needs a replica. Never NOT_READY (our server is starting or
+# draining) or MISCONFIGURED (a restart can't fix a wrong token or URL).
+WAKEABLE = (Verdict.ASLEEP, Verdict.DOWN)
+
+
 # A request that gets one of these never reached a working model, so another replica may try it.
 RETRYABLE = frozenset({Verdict.NOT_READY, Verdict.ASLEEP, Verdict.DOWN, Verdict.MISCONFIGURED, Verdict.BUSY})
 
@@ -67,8 +72,8 @@ def _error_type(text: str) -> str | None:
 
 
 def classify(reply: Reply) -> Verdict:
-    """The reply table in docs/SERVING.md, as code. Anything unrecognised is DOWN: never ready,
-    never woken, and never shown to a visitor, because it didn't come from our server."""
+    """The reply table in docs/SERVING.md, as code. Anything unrecognised is DOWN: never ready and never
+    shown to a visitor, because it didn't come from our server. It is woken only if the Hub says it is asleep."""
     status = reply.status
     if status is None or status == 502 or 300 <= status < 400:      # redirects aren't followed: the token stays here
         return Verdict.DOWN
@@ -105,7 +110,6 @@ class Replica:
     space_id: str = ""              # owner/name on the Hub, for waking it
     woken_at: float | None = None
     model: dict | None = None       # id, version and norm_backend, from the last readable /stats
-    silent: bool = False            # the last poll got no answer at all: a sleeping Space holds requests while it wakes
 
     @property
     def ready(self) -> bool:
@@ -353,7 +357,6 @@ class ReplicaRouter:
             if isinstance(result, Exception):
                 log.error("poll failed", extra={"fields": {"replica": replica.name, "error": type(result).__name__}})
                 replica.polled(Verdict.DOWN, time.monotonic())
-                replica.silent = False
         self._snapshot()
 
     async def _get(self, replica: Replica, path: str) -> httpx.Response | None:
@@ -369,8 +372,8 @@ class ReplicaRouter:
                                                   self.cfg.poll_timeout_s)
         except asyncio.TimeoutError:
             ready = stats = None
-        before, verdict, now = replica.verdict, classify(_reply(ready)), time.monotonic()
-        replica.silent = ready is None
+        reply = _reply(ready)
+        before, verdict, now = replica.verdict, classify(reply), time.monotonic()
         if verdict is Verdict.OK:
             readable = classify(_reply(stats)) is Verdict.OK
             load = _load(stats.content) if readable else None
@@ -381,7 +384,11 @@ class ReplicaRouter:
             replica.polled(verdict, now)
         if verdict is not before:
             level = logging.ERROR if verdict is Verdict.MISCONFIGURED else logging.INFO
-            log.log(level, "replica state", extra={"fields": {"replica": replica.name, "state": verdict.value}})
+            # Status and content type say which row of the reply table matched; status None = no answer.
+            # Never the body: an HF page can name the private Space.
+            log.log(level, "replica state", extra={"fields": {
+                "replica": replica.name, "state": verdict.value, "status": reply.status,
+                "content_type": reply.content_type.split(";")[0].strip()[:40]}})
 
     def _snapshot(self) -> None:
         """For the status page's load chart. A gap in the chart means no replica was ready."""
@@ -425,15 +432,14 @@ class ReplicaRouter:
         return out
 
     def wake_asleep(self, now: float) -> None:
-        """A replica HF says is paused, or one whose last poll got no answer at all: a sleeping Space holds
-        requests while it wakes, and a short poll gives up first (2026-11-10 check). The wake function reads
-        the Hub's own stage and restarts only a sleeping or paused Space: restarting a running one would kill
-        its requests."""
+        """A replica that showed HF's paused page, or any replica that is down: an asleep Space doesn't say
+        so in a way the router can rely on (2026-11-10 test: the router got a fast answer it calls down).
+        The wake function reads the Hub's own stage and restarts only a sleeping or paused Space: restarting
+        a running one would kill its requests, and a crashed one needs a person."""
         if self.wake is None:
             return
         for r in self.replicas:
-            asleep = r.verdict is Verdict.ASLEEP or (r.verdict is Verdict.DOWN and r.silent)
-            if asleep and (r.woken_at is None or now - r.woken_at >= self.cfg.wake_cooldown_s):
+            if r.verdict in WAKEABLE and (r.woken_at is None or now - r.woken_at >= self.cfg.wake_cooldown_s):
                 r.woken_at = now
                 task = asyncio.create_task(self._wake(r))
                 self._background.add(task)
