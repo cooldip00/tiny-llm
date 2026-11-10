@@ -41,8 +41,10 @@ def _svg(fig: Figure) -> str:
 
 
 def _head(ax, title: str, subtitle: str, lift: float = 0) -> None:
-    """Left-aligned title and subtitle above the plot area, placed in points so they never overlap it."""
-    ax.annotate(title, (0, 1), xycoords="axes fraction", xytext=(0, 30 + lift), textcoords="offset points",
+    """Left-aligned title and subtitle above the plot area, placed in points so they never overlap it.
+    A subtitle with line breaks pushes the title up one line per break."""
+    lift_title = lift + 12 * subtitle.count("\n")
+    ax.annotate(title, (0, 1), xycoords="axes fraction", xytext=(0, 30 + lift_title), textcoords="offset points",
                 fontsize=12.5, fontweight="bold", va="bottom")
     ax.annotate(subtitle, (0, 1), xycoords="axes fraction", xytext=(0, 12 + lift), textcoords="offset points",
                 fontsize=9.5, va="bottom")
@@ -161,8 +163,9 @@ def train_loss(curve: dict) -> Figure:
 
 def decode_profile(data: dict) -> Figure:
     d = data["tl-profile"]
-    modes = [("eager", "Eager: one launch per kernel"), ("graph", "CUDA graph: one launch per step")]
-    fig = Figure(figsize=(7.6, 2.1))
+    # Two-line labels and a two-line subtitle keep the SVG narrow enough to show near full size in a blog column.
+    modes = [("eager", "Eager:\none launch per kernel"), ("graph", "CUDA graph:\none launch per step")]
+    fig = Figure(figsize=(6.0, 2.1))
     ax = fig.add_subplot()
     for i, (mode, _) in enumerate(modes):
         m = d["modes"][mode]
@@ -182,7 +185,7 @@ def decode_profile(data: dict) -> Figure:
     ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncols=2, fontsize=9, borderaxespad=0.2)
     speed = d["modes"]["eager"]["ms_per_step"] / d["modes"]["graph"]["ms_per_step"]
     _head(ax, "Why CUDA graphs help: TinyLlama 1.1B decode step, batch 1",
-          f"In eager mode Python launches every kernel and the GPU waits; a graph replays the whole step "
+          f"In eager mode Python launches every kernel and the GPU waits;\na graph replays the whole step "
           f"at once ({speed:.2f}× faster).", lift=16)                           # above the legend
     _foot(ax, _source(data, "tl-profile"), below=40)
     return fig
@@ -213,8 +216,9 @@ def serving(data: dict) -> Figure:
         ax.spines["bottom"].set_visible(False)
         ax.set_title(title, loc="left", fontsize=10, color=INK)
     _head(axes[0], f"Serving throughput, {data['tl-serving']['workload']['requests']} mixed-length requests",
-          "Tokens / s; × = vs the first row. Continuous batching refills a slot as soon as its request ends; "
-          "the paged cache fits more sequences in the same memory.", lift=18)   # above the panel titles
+          "Tokens / s; × = vs the first row. Continuous batching refills a slot as soon as its request ends;\n"
+          "the paged cache fits more sequences in the same memory.", lift=18)   # two lines: one line made the SVG
+                                                                                # 1.6× wider than the plot
     _foot(axes[0], _source(data, "tl-serving"), below=12)
     return fig
 
