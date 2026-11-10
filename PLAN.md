@@ -254,7 +254,7 @@ Each phase ends with **Done when** checks. Don't start the next phase until they
       - If late, cut first the 1-vs-2 load test, then move the router and replicas to v1.1.
       - _Stage 1 done 2026-11-08: router code, CPU tests against fake replicas, real end-to-end run on the laptop CPU (docs/SERVING.md "Built so far"). Open: stage 2 (create the Spaces and the router token), stage 3 (1-vs-2 load test)._
   - [x] 6.5c W&B project set to public; link the training curves from the README
-  - [ ] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume
+  - [x] 6.5d Blog post (e.g. "Building an LLM inference engine on a laptop GPU"), linked from the README and resume _Done 2026-11-10: live on GitHub Pages at https://cooldip00.github.io/llm-inference-engine-from-scratch/ (site repo cooldip00/cooldip00.github.io); linked from the README; resume link added by the user._
   - [ ] 6.5e LinkedIn: three posts, whole story first (whole project + blog link → why decode is memory-bandwidth bound and CUDA graphs → serving, the vLLM comparison, router and replicas). _Order changed 2026-11-09: everything is built, so the posts no longer follow build order._
   - [ ] 6.5f r/LocalLLaMA (and r/MachineLearning with a [P] tag) once the TinyLlama numbers are in
   - [ ] 6.5g Direct outreach: send the repo to engineers at companies building inference products

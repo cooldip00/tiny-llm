@@ -6,6 +6,8 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 
 **Try it:** [live demo on Hugging Face Spaces](https://huggingface.co/spaces/CoolDip00/tiny-llm) ([status page](https://cooldip00-tiny-llm.hf.space/status)). It runs the 30M model on two private free-CPU Spaces behind our own public router Space, and continues short stories. It is a base model trained only on TinyStories, so it doesn't answer questions. The speed numbers below come from the laptop GPU, not the Spaces, except the one section that load-tests the Spaces. After two idle days the Spaces go to sleep, so the next visitor waits while they wake up.
 
+**Blog post:** [I built an LLM inference engine from scratch and measured it against my laptop GPU's limit](https://cooldip00.github.io/llm-inference-engine-from-scratch/), the whole story in plain language: how decode reached 71% of the ceiling, where it still loses to vLLM, and what went wrong on the way.
+
 **Why:** inference libraries hide where the time goes. Building each layer by hand, from training through the inference engine to the HTTP server and its router, makes each one measurable, and the bandwidth ceiling shows how much speed is left to find.
 
 **Highlights**
@@ -20,7 +22,7 @@ A Llama-style LLM trained from scratch on one laptop GPU (RTX 3070 Ti Laptop, 8 
 - **HTTP server:** OpenAI-compatible `/v1/completions`, with streaming. Past capacity it rejects requests with a 429, so time to first token stays bounded, where vLLM's and llama.cpp's grow with the queue ([vs vLLM and llama.cpp](#results-vs-vllm-and-llamacpp)).
 - **Deployment:** the public demo is our own router in front of two replica Spaces on free CPUs. Two replicas hold 3 req/s within the latency targets where one holds 1, and peak served rises 1.85× to 2.00×, with no failed requests ([1 vs 2 replicas](#results-1-vs-2-replicas-on-hugging-faces-cpus)).
 
-> Status: **v1-preview**. Still to come: CUDA graphs for the paged engine and an attention ablation (see [Roadmap](#roadmap)).
+> Status: **v1**. Next: CUDA graphs for the paged engine and an attention ablation (see [Roadmap](#roadmap)).
 
 ## Results: TinyLlama 1.1B inference
 
